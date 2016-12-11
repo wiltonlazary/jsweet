@@ -16,9 +16,10 @@
  */
 package source.syntax;
 
-import jsweet.lang.RegExp;
 import static jsweet.util.Globals.string;
 import static source.syntax.Globals.toTitleCase;
+
+import jsweet.lang.RegExp;
 
 public class GlobalsInvocation {
 
@@ -35,7 +36,13 @@ public class GlobalsInvocation {
 	}
 }
 
+/**
+ * This is a doc comment to test comments.
+ */
 class Globals {
+	/**
+	 * A global method.
+	 */
 	public static String toTitleCase(String str) {
 		return string(str).replace(new RegExp("/\\w\\S*/g"), (tok, i) -> {
 			jsweet.lang.String txt = string(tok);

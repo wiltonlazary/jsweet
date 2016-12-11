@@ -147,6 +147,7 @@ public abstract class JSweetConfig {
 	public static String MAVEN_JAVA_OVERRIDE_ARTIFACT = "jsweet-core-strict";
 
 	private final static String JAVA_PACKAGE = "java";
+	private final static String JAVAX_PACKAGE = "javax";
 	private final static String ROOT_PACKAGE = "jsweet";
 	/** The constant for the JSweet lang package. */
 	public final static String LANG_PACKAGE = ROOT_PACKAGE + ".lang";
@@ -230,6 +231,7 @@ public abstract class JSweetConfig {
 	public static final String ANNOTATION_STRING_TYPE = JSweetConfig.LANG_PACKAGE + ".StringType";
 	public static final String ANNOTATION_ROOT = JSweetConfig.LANG_PACKAGE + ".Root";
 	public static final String ANNOTATION_NAME = JSweetConfig.LANG_PACKAGE + ".Name";
+	public static final String ANNOTATION_DECORATOR = JSweetConfig.LANG_PACKAGE + ".Decorator";
 	public static final String ANNOTATION_FUNCTIONAL_INTERFACE = FunctionalInterface.class.getName();
 
 	/**
@@ -255,6 +257,16 @@ public abstract class JSweetConfig {
 	 * level.
 	 */
 	public static final Set<String> TS_TOP_LEVEL_KEYWORDS = new HashSet<String>();
+
+	/**
+	 * The prefix to add to variables that clash with JS keywords.
+	 */
+	public static final String JS_KEYWORD_PREFIX = "__";
+
+	/**
+	 * The prefix to add to variables that clash with methods.
+	 */
+	public static final String FIELD_METHOD_CLASH_RESOLVER_PREFIX = "__";
 
 	static {
 		// note TS keywords are removed from that list
@@ -312,6 +324,8 @@ public abstract class JSweetConfig {
 		JS_KEYWORDS.add("function");
 		JS_KEYWORDS.add("var");
 		JS_KEYWORDS.add("typeof");
+		JS_KEYWORDS.add("in");
+		JS_KEYWORDS.add("arguments");
 
 		TS_STRICT_MODE_KEYWORDS.add("as");
 		TS_STRICT_MODE_KEYWORDS.add("implements");
@@ -331,28 +345,6 @@ public abstract class JSweetConfig {
 		TS_TOP_LEVEL_KEYWORDS.add("require");
 	}
 
-	/**
-	 * This function return a Javascript-friendly identifier from a
-	 * Java-formatted one.
-	 * 
-	 * @param identifier
-	 *            the Java-formatted identifier
-	 * @return the Javascript-friendly identifier
-	 */
-	public static String toJsIdentifier(String identifier) {
-		// "trick" to change back java keywords, which are reserved to valid js
-		// identifier (ex: Catch => catch, New => new)
-		// TODO : but we should actually check if identifier's target has a
-		// @Name
-		if (!identifier.isEmpty() //
-				&& Character.isUpperCase(identifier.charAt(0)) //
-				&& (identifier.length() <= 1 || Character.isLowerCase(identifier.charAt(1))) //
-				&& JSweetConfig.JAVA_KEYWORDS.contains(identifier.toLowerCase()) && !JSweetConfig.TS_STRICT_MODE_KEYWORDS.contains(identifier.toLowerCase())) {
-			return identifier.toLowerCase();
-		}
-		return identifier;
-	}
-
 	public static boolean isJDKReplacementMode() {
 		return "java.lang".equals(LANG_PACKAGE);
 	}
@@ -366,10 +358,10 @@ public abstract class JSweetConfig {
 
 	/**
 	 * Tells if this qualified name belongs to the JDK (starts with
-	 * {@value #JAVA_PACKAGE}).
+	 * {@value #JAVA_PACKAGE} or {@value #JAVAX_PACKAGE}).
 	 */
 	public static boolean isJDKPath(String qualifiedName) {
-		return qualifiedName.startsWith(JAVA_PACKAGE + ".");
+		return qualifiedName.startsWith(JAVA_PACKAGE + ".") || qualifiedName.startsWith(JAVAX_PACKAGE + ".");
 	}
 
 	/**

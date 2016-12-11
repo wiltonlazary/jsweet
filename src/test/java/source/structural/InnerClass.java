@@ -16,9 +16,54 @@
  */
 package source.structural;
 
+import static jsweet.util.Globals.$export;
+
 public class InnerClass {
 
-	public class InnerClass1 {
+	public static void main(String[] args) {
+		new InnerClass.InnerClass1().m1();
+		new InnerClass().m();
+		InnerClass1.m2();
+		String s = InnerClass1.S;
 	}
-	
+
+	public void m() {
+		new InnerClass.InnerClass2().m2();
+	}
+
+	static int i = 1;
+
+	static int parentMethod() {
+		return 4;
+	}
+
+	private final static class InnerClass1 {
+
+		private static String S = "abc";
+
+		private void m1() {
+			$export("value1", "test" + i);
+			$export("value4", "test" + parentMethod());
+		}
+
+		public static void m2() {
+			$export("value3", "test3");
+		}
+	}
+
+	public static class InnerClass2 {
+
+		public void m2() {
+			$export("value2", "test2");
+		}
+
+		public static void main(String[] args) {
+
+		}
+	}
+
+	public interface I {
+
+	}
+
 }

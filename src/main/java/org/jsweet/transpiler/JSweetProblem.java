@@ -16,6 +16,8 @@
  */
 package org.jsweet.transpiler;
 
+import org.jsweet.JSweetConfig;
+
 /**
  * This enumeration holds all the possible JSweet transpilation problems
  * (warnings and errors) and the associated messages.
@@ -29,13 +31,23 @@ public enum JSweetProblem {
 	 */
 	JAVA_COMPILER_NOT_FOUND(Severity.ERROR),
 	/**
-	 * Raised when the Java compiler reports errors.
+	 * Raised when the Java compiler reports an error.
 	 */
-	JAVA_ERRORS(Severity.ERROR),
+	INTERNAL_JAVA_ERROR(Severity.ERROR),
+	/**
+	 * Raised when the transpiler meets an error while scanning the program's
+	 * AST.
+	 */
+	INTERNAL_TRANSPILER_ERROR(Severity.ERROR),
 	/**
 	 * Raised when the Tsc transpiler reports an error.
 	 */
 	INTERNAL_TSC_ERROR(Severity.ERROR),
+	/**
+	 * Raised when the Tsc transpiler reports an error that can be mapped to the
+	 * original source file.
+	 */
+	MAPPED_TSC_ERROR(Severity.ERROR),
 	/**
 	 * Raised when the Tsc transpiler (or the expected version) is not found if
 	 * required.
@@ -70,7 +82,7 @@ public enum JSweetProblem {
 	/**
 	 * Raised when the program tries to use the synchronized keyword.
 	 */
-	SYNCHRONIZATION(Severity.ERROR),
+	SYNCHRONIZATION(Severity.WARNING),
 	/**
 	 * Raised when a method has the same name as a field, including fields
 	 * defined in superclasses.
@@ -81,6 +93,11 @@ public enum JSweetProblem {
 	 * defined in superclasses.
 	 */
 	FIELD_CONFLICTS_METHOD(Severity.ERROR),
+	/**
+	 * Raised when a method invocation is hidden by a local variable or
+	 * parameter.
+	 */
+	HIDDEN_INVOCATION(Severity.ERROR),
 	/**
 	 * Raised when an inner class is found.
 	 */
@@ -109,10 +126,6 @@ public enum JSweetProblem {
 	 */
 	INVALID_PRIVATE_IN_INTERFACE(Severity.ERROR),
 	/**
-	 * Raised when a static modifier is used in an interface.
-	 */
-	INVALID_STATIC_IN_INTERFACE(Severity.ERROR),
-	/**
 	 * Raised when a method body is defined in an interface.
 	 */
 	INVALID_METHOD_BODY_IN_INTERFACE(Severity.ERROR),
@@ -129,27 +142,18 @@ public enum JSweetProblem {
 	 */
 	INVALID_OVERLOAD(Severity.ERROR),
 	/**
+	 * Raised when an overload parameter is not valid.
+	 */
+	INVALID_OVERLOAD_PARAMETER(Severity.ERROR),
+	/**
 	 * Raised when a member is named 'constructor'.
 	 */
 	CONSTRUCTOR_MEMBER(Severity.ERROR),
-	/**
-	 * Raised when a class annotated with @Interface is not abstract.
-	 */
-	INTERFACE_MUST_BE_ABSTRACT(Severity.ERROR),
 	/**
 	 * Raised when a native modifier is used at the wrong place (only allowed in
 	 * definitions).
 	 */
 	NATIVE_MODIFIER_IS_NOT_ALLOWED(Severity.ERROR),
-
-	/**
-	 * Raised when instanceof is applied to an interface.
-	 */
-	INVALID_INSTANCEOF_INTERFACE(Severity.ERROR),
-	/**
-	 * Raised when the program tries to use a label.
-	 */
-	LABELS_ARE_NOT_SUPPORTED(Severity.ERROR),
 	/**
 	 * Raised when a try statement does not declare a catch or a finally clause.
 	 */
@@ -225,19 +229,9 @@ public enum JSweetProblem {
 	 */
 	UNION_TYPE_MISMATCH(Severity.ERROR),
 	/**
-	 * Raised when an union type assignment is not compatible with one of the
-	 * union-ed types.
+	 * Raised when trying to create a bundle with a module kind selected.
 	 */
-	BUNDLE_WITH_COMMONJS(Severity.WARNING),
-	/**
-	 * Raised when a bundle cannot be done because of a cycle in the
-	 * module/packages.
-	 */
-	BUNDLE_HAS_CYCLE(Severity.ERROR),
-	/**
-	 * Raised when a bundle cannot be done because it has no entries.
-	 */
-	BUNDLE_HAS_NO_ENTRIES(Severity.WARNING),
+	BUNDLE_WITH_MODULE(Severity.ERROR),
 	/**
 	 * Raised when a package is named after an invalid name (typically a
 	 * TypeScript keyword).
@@ -254,7 +248,52 @@ public enum JSweetProblem {
 	/**
 	 * Raised when a class is declared in a parent of a @Root package.
 	 */
-	CLASS_OUT_OF_ROOT_PACKAGE_SCOPE(Severity.ERROR);
+	CLASS_OUT_OF_ROOT_PACKAGE_SCOPE(Severity.ERROR),
+	/**
+	 * Raised when several @Root packages are used with the module option (the
+	 * default package being considered as a @Root package).
+	 */
+	MULTIPLE_ROOT_PACKAGES_NOT_ALLOWED_WITH_MODULES(Severity.ERROR),
+	/**
+	 * Raised when using a candy which was generated for an older / newer
+	 * version of the transpiler
+	 */
+	CANDY_VERSION_DISCREPANCY(Severity.WARNING),
+	/**
+	 * Raised when a Globals class declares a non static member.
+	 */
+	GLOBALS_CAN_ONLY_HAVE_STATIC_MEMBERS(Severity.ERROR),
+	/**
+	 * Raised when a Globals class declares a superclass.
+	 */
+	GLOBALS_CLASS_CANNOT_HAVE_SUPERCLASS(Severity.ERROR),
+	/**
+	 * Raised when a class tries to extend a Globals class.
+	 */
+	GLOBALS_CLASS_CANNOT_BE_SUBCLASSED(Severity.ERROR),
+	/**
+	 * Raised when trying to access this from scope it isn't defined.
+	 */
+	CANNOT_ACCESS_THIS(Severity.ERROR),
+	/**
+	 * Raised when invoking a static method on this (this is allowed in Java,
+	 * but not in JSweet).
+	 */
+	CANNOT_ACCESS_STATIC_MEMBER_ON_THIS(Severity.ERROR),
+	/**
+	 * Raised when a <code>$object</code> method is invoked with an odd number
+	 * of parameters.
+	 */
+	UNTYPED_OBJECT_ODD_PARAMETER_COUNT(Severity.ERROR),
+	/**
+	 * Raised when a <code>$object</code> method is invoked with a key that is
+	 * not a string literal.
+	 */
+	UNTYPED_OBJECT_WRONG_KEY(Severity.ERROR),
+	/**
+	 * Raised when a cycle is detected in static initializers.
+	 */
+	CYCLE_IN_STATIC_INITIALIZER_DEPENDENCIES(Severity.ERROR);
 
 	private Severity severity;
 
@@ -278,60 +317,59 @@ public enum JSweetProblem {
 			return String.format(
 					"Java compiler cannot be found: make sure that JAVA_HOME points to a JDK (version>=8) and not a JRE, or sets the transpiler jdkHome option",
 					params);
-		case JAVA_ERRORS:
-			return String.format("Java compiler reports %s error(s) that should be fixed before transpiling", params);
+		case INTERNAL_JAVA_ERROR:
+			return String.format("%s", params);
 		case INTERNAL_TSC_ERROR:
 			return String.format("internal TypeScript error: %s", params);
+		case MAPPED_TSC_ERROR:
+			return String.format("%s", params);
 		case NODE_CANNOT_START:
 			return String.format("cannot find Node.js: install first and make sure that the 'node' command is in your execution path", params);
 		case TSC_CANNOT_START:
 			return String.format("cannot find TypeScript compiler: install first and make sure that the 'tsc' command is in your execution path", params);
 		case JDK_TYPE:
-			return String.format("invalid access to JDK type %s from JSweet", params);
+			return String.format("invalid access to JDK type '%s' from JSweet", params);
 		case JDK_METHOD:
-			return String.format("invalid access to JDK method %s from JSweet", params);
+			return String.format("invalid access to JDK method '%s' from JSweet", params);
 		case ERASED_METHOD:
-			return String.format("invalid access to erased method %s", params);
+			return String.format("invalid access to erased method '%s'", params);
 		case ERASED_CLASS_CONSTRUCTOR:
 			return String.format("erased class constructors must take exactly one parameter", params);
 		case SYNCHRONIZATION:
-			return String.format("synchronization is not allowed in JSweet", params);
+			return String.format("synchronization is ignored in JSweet", params);
 		case METHOD_CONFLICTS_FIELD:
-			return String.format("method %s has the same name as a field in %s", params);
+			return String.format("method '%s' has the same name as a field in '%s'", params);
+		case HIDDEN_INVOCATION:
+			return String.format("invocation of '%s' is hidden by a local variable", params);
 		case FIELD_CONFLICTS_METHOD:
-			return String.format("field %s has the same name as a method in %s", params);
+			return String.format("field '%s' has the same name as a method in '%s'", params);
 		case INNER_CLASS:
-			return String.format("inner classes are not allowed in JSweet: %s", params);
+			return String.format("inner classes are not allowed in JSweet: '%s'", params);
 		case INVALID_INITIALIZER_STATEMENT:
 			return String.format("invalid initializer statement; only field assignments are allowed", params);
 		case UNINITIALIZED_FIELD:
-			return String.format("field %s is not optional (see @Optional) but has not been initialized", params);
+			return String.format("field '%s' is not optional (see @Optional) but has not been initialized", params);
 		case USELESS_OPTIONAL_ANNOTATION:
 			return String.format("useless @Optional field %s (fields are optional by default in classes, use @Interface to define %s as an interface)", params);
 		case JS_KEYWORD_CONFLICT:
-			return String.format("local variable name '%s' is not allowed and is automatically generated to '_jsweet_%s'", params);
+			return String.format("local variable name '%s' is not allowed and is automatically generated to '" + JSweetConfig.JS_KEYWORD_PREFIX + "%s'",
+					params);
 		case INVALID_METHOD_BODY_IN_INTERFACE:
-			return String.format("method %s cannot define a body in interface %s", params);
+			return String.format("method '%s' cannot define a body in interface '%s' (try 'abstract' or 'native' modifiers)", params);
 		case INVALID_PRIVATE_IN_INTERFACE:
-			return String.format("member %s cannot be private in interface %s", params);
-		case INVALID_STATIC_IN_INTERFACE:
-			return String.format("member %s cannot be static in interface %s", params);
+			return String.format("member '%s' cannot be private in interface '%s'", params);
 		case INVALID_FIELD_INITIALIZER_IN_INTERFACE:
-			return String.format("field %s cannot be initialized in interface %s", params);
+			return String.format("field '%s' cannot be initialized in interface '%s'", params);
 		case INVALID_INITIALIZER_IN_INTERFACE:
-			return String.format("no initialization blocks are allowed in interface %s", params);
+			return String.format("no initialization blocks are allowed in interface '%s'", params);
 		case INVALID_OVERLOAD:
-			return String.format("invalid overload of method %s", params);
+			return String.format("invalid overload of method '%s'", params);
+		case INVALID_OVERLOAD_PARAMETER:
+			return String.format("overloaded methods can only be invoked with literal parameters (constants)", params);
 		case CONSTRUCTOR_MEMBER:
 			return String.format("invalid member name 'constructor'", params);
-		case INTERFACE_MUST_BE_ABSTRACT:
-			return String.format("@Interface '%s' must be abstract", params);
 		case NATIVE_MODIFIER_IS_NOT_ALLOWED:
-			return String.format("method %s cannot be native", params);
-		case INVALID_INSTANCEOF_INTERFACE:
-			return String.format("operator 'instanceof' cannot apply to interfaces", params);
-		case LABELS_ARE_NOT_SUPPORTED:
-			return String.format("labels are not supported", params);
+			return String.format("method '%s' cannot be native", params);
 		case TRY_WITHOUT_CATCH_OR_FINALLY:
 			return String.format("try statement must define at least a catch or a finally clause", params);
 		case UNSUPPORTED_TRY_WITH_RESOURCE:
@@ -357,7 +395,7 @@ public enum JSweetProblem {
 		case INVALID_METHOD_IN_ENUM:
 			return String.format("methods are not allowed in enums", params);
 		case INVALID_METHOD_BODY_IN_AMBIENT:
-			return String.format("method %s is an ambiant declaration and cannot define an implementation", params);
+			return String.format("method '%s' is an ambiant declaration and cannot define an implementation", params);
 		case INVALID_NON_EMPTY_CONSTRUCTOR_IN_AMBIENT:
 			return String.format("constructor is an ambiant declaration and must have an empty body", params);
 		case INVALID_MODIFIER_IN_AMBIENT:
@@ -366,22 +404,41 @@ public enum JSweetProblem {
 			return String.format("type mismatch, expecting '%s' (inferred from the indexed getter type)", params);
 		case UNION_TYPE_MISMATCH:
 			return String.format("type mismatch in union type", params);
-		case BUNDLE_WITH_COMMONJS:
-			return String.format("no bundle file generated: choose the 'commonjs' module kind when specifying a bundle file", params);
-		case BUNDLE_HAS_CYCLE:
-			return String.format("no bundle file generated: cycle detected in package graph %s", params);
-		case BUNDLE_HAS_NO_ENTRIES:
-			return String.format("no bundle file generated: no entries found, you must define at least one main method", params);
+		case BUNDLE_WITH_MODULE:
+			return String.format("bundle and module options are exclusive: choose one or the other", params);
 		case PACKAGE_NAME_CONTAINS_KEYWORD:
-			return String.format("a package name cannot contain top-level keyword(s): %s", params);
+			return String.format("a package name cannot contain top-level keyword(s): '%s'", params);
 		case WILDCARD_IMPORT:
 			return String.format("imports cannot use * wildcards: please import a specific element", params);
 		case ENCLOSED_ROOT_PACKAGES:
-			return String.format("invalid package hierarchy: @Root package %s cannot be enclosed in @Root package %s", params);
+			return String.format("invalid package hierarchy: @Root package '%s' cannot be enclosed in @Root package '%s'", params);
+		case MULTIPLE_ROOT_PACKAGES_NOT_ALLOWED_WITH_MODULES:
+			return String.format("multipe @Root packages (including the default 'null' package) are not allowed when using modules, found packages: %s",
+					params);
 		case CLASS_OUT_OF_ROOT_PACKAGE_SCOPE:
-			return String.format("invalid package hierarchy: type %s is declared in a parent of @Root package %s", params);
+			return String.format("invalid package hierarchy: type '%s' is declared in a parent of @Root package '%s'", params);
 		case WRONG_USE_OF_AMBIENT:
-			return String.format("wrong use of @Ambient on %s: only types and globals can be declared as ambients", params);
+			return String.format("wrong use of @Ambient on '%s': only types and globals can be declared as ambients", params);
+		case CANDY_VERSION_DISCREPANCY:
+			return String.format("candy %s:%s was generated for a different version of the transpiler (current:%s, candy:%s)", params);
+		case GLOBALS_CAN_ONLY_HAVE_STATIC_MEMBERS:
+			return String.format("globals classes can only define static members", params);
+		case GLOBALS_CLASS_CANNOT_HAVE_SUPERCLASS:
+			return String.format("globals classes cannot extend any class", params);
+		case GLOBALS_CLASS_CANNOT_BE_SUBCLASSED:
+			return String.format("globals classes cannot be subclassed", params);
+		case CANNOT_ACCESS_THIS:
+			return String.format("'this' isn't defined in scope of %s", params);
+		case CANNOT_ACCESS_STATIC_MEMBER_ON_THIS:
+			return String.format("member '%s' is static and cannot be accessed on 'this'", params);
+		case UNTYPED_OBJECT_ODD_PARAMETER_COUNT:
+			return String.format("wrong parameter count: method '$object' expects a list of key/value pairs as parameters", params);
+		case UNTYPED_OBJECT_WRONG_KEY:
+			return String.format("wrong key: method '$object' expects a list of key/value pairs as parameters, where keys are string literals", params);
+		case CYCLE_IN_STATIC_INITIALIZER_DEPENDENCIES:
+			return String.format("a cycle was detected in static intializers involving '%s'", params);
+		case INTERNAL_TRANSPILER_ERROR:
+			return String.format("internal transpiler error");
 		}
 		return null;
 	}

@@ -16,27 +16,59 @@
  */
 package source.overload;
 
-public class WrongOverloads {
+import static jsweet.util.Globals.$export;
+import static jsweet.util.Globals.array;
+
+class SuperClass {
+
+	public SuperClass() {
+		array(WrongOverloads.trace).push("1");
+	}
+
+	public SuperClass(int i) {
+		array(WrongOverloads.trace).push("2");
+	}
+
+}
+
+public class WrongOverloads extends SuperClass {
+
+	public static String[] trace = {};
+
+	public static void main(String[] args) {
+
+		new WrongOverloads();
+		new WrongOverloads("test");
+		new WrongOverloads("test5", 0);
+		new WrongOverloads(true);
+		$export("trace", trace);
+	}
 
 	private void draw() {
 		System.out.println("tutu");
 	}
 
 	private void draw(String s) {
-	}	
+	}
+
+	public void draw(String s, Object o) {
+	}
+
+	public void draw(String s, Integer i) {
+	}
 	
 	int i;
 
 	String getter() {
 		return "";
 	}
-	
+
 	void m() {
 		// other statements are not allowed in overloading
 		i = 0;
 		this.m("");
 	}
-	
+
 	void m(String s) {
 		// calling a method is wrong for overloading
 		this.m(getter(), 1);
@@ -45,14 +77,81 @@ public class WrongOverloads {
 	// this method cannot overload the one with string
 	void m(int i) {
 	}
-	
+
 	void m(String s, int i) {
 		s = "";
 	}
-	
+
 	public WrongOverloads() {
+		array(WrongOverloads.trace).push("5");
 		draw();
 		draw("");
 	}
-	
+
+	public WrongOverloads(String s) {
+		super(1);
+		array(WrongOverloads.trace).push("3");
+		System.out.println(s);
+	}
+
+	public WrongOverloads(String s5, int i2) {
+		super(0);
+		String s = "tutu";
+		array(WrongOverloads.trace).push("4");
+		array(WrongOverloads.trace).push(s5);
+		array(WrongOverloads.trace).push(s);
+		System.out.println(s);
+	}
+
+	public WrongOverloads(boolean b) {
+		this("1", 0);
+		array(WrongOverloads.trace).push("6");
+	}
+
+	public WrongOverloads(String s, int i, String s2) {
+		array(WrongOverloads.trace).push("10");
+		System.out.println(s);
+	}
+
+	int test(int x, int y) {
+		return x + y;
+	}
+
+	int test(Data d) {
+		return test(d.x, d.y);
+	}
+
+}
+
+class Data {
+	int x;
+	int y;
+}
+
+class CharSequenceAdapter {
+	private char[] charArray;
+	private int start;
+	private int end;
+
+	public CharSequenceAdapter(char[] charArray) {
+		this(charArray, 0, charArray.length);
+	}
+
+	public CharSequenceAdapter(char[] charArray, int start, int end) {
+		this.charArray = charArray;
+		this.start = start;
+		this.end = end;
+	}
+
+	public char charAt(int index) {
+		return charArray[index + start];
+	}
+
+	public int length() {
+		return end - start;
+	}
+
+	public CharSequenceAdapter subSequence(int start, int end) {
+		return new CharSequenceAdapter(charArray, this.start + start, this.start + end);
+	}
 }

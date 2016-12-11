@@ -36,6 +36,8 @@ public class JdkInvocations {
 		$export("s4", s.concat("c"));
 		$export("i1", s.indexOf("s"));
 		$export("i2", s.lastIndexOf("gg"));
+		$export("l", s.length());
+		$export("r", s.replace("e", "1"));
 		s.lastIndexOf("", 10);
 		Other4 o2 = new Other4();
 		o2.toString();

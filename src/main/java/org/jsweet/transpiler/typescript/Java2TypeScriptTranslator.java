@@ -17,44 +17,58 @@
 package org.jsweet.transpiler.typescript;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.jsweet.JSweetConfig.ANNOTATION_STRING_TYPE;
+import static org.jsweet.JSweetConfig.GLOBALS_CLASS_NAME;
+import static org.jsweet.JSweetConfig.GLOBALS_PACKAGE_NAME;
+import static org.jsweet.transpiler.util.Util.getFirstAnnotationValue;
 import static org.jsweet.transpiler.util.Util.getRootRelativeJavaName;
-import static org.jsweet.transpiler.util.Util.getRootRelativeName;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.Stack;
+import java.util.stream.Collectors;
 
+import javax.lang.model.element.AnnotationMirror;
+import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.type.TypeKind;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.log4j.Logger;
 import org.jsweet.JSweetConfig;
 import org.jsweet.transpiler.JSweetContext;
 import org.jsweet.transpiler.JSweetProblem;
 import org.jsweet.transpiler.OverloadScanner.Overload;
-import org.jsweet.transpiler.SourceFile;
 import org.jsweet.transpiler.TranspilationHandler;
 import org.jsweet.transpiler.util.AbstractTreePrinter;
 import org.jsweet.transpiler.util.Util;
 import org.jsweet.transpiler.util.VariableKind;
 
 import com.sun.source.tree.Tree.Kind;
-import com.sun.tools.javac.code.Flags;
 import com.sun.tools.javac.code.Symbol;
 import com.sun.tools.javac.code.Symbol.ClassSymbol;
 import com.sun.tools.javac.code.Symbol.MethodSymbol;
 import com.sun.tools.javac.code.Symbol.PackageSymbol;
+import com.sun.tools.javac.code.Symbol.TypeSymbol;
+import com.sun.tools.javac.code.Symbol.TypeVariableSymbol;
 import com.sun.tools.javac.code.Symbol.VarSymbol;
+import com.sun.tools.javac.code.Type;
 import com.sun.tools.javac.code.Type.ArrayType;
 import com.sun.tools.javac.code.Type.MethodType;
 import com.sun.tools.javac.code.TypeTag;
+import com.sun.tools.javac.parser.Tokens.Comment;
 import com.sun.tools.javac.tree.JCTree;
+import com.sun.tools.javac.tree.JCTree.JCAnnotation;
 import com.sun.tools.javac.tree.JCTree.JCArrayAccess;
 import com.sun.tools.javac.tree.JCTree.JCArrayTypeTree;
 import com.sun.tools.javac.tree.JCTree.JCAssert;
@@ -102,6 +116,7 @@ import com.sun.tools.javac.tree.JCTree.JCUnary;
 import com.sun.tools.javac.tree.JCTree.JCVariableDecl;
 import com.sun.tools.javac.tree.JCTree.JCWhileLoop;
 import com.sun.tools.javac.tree.TreeScanner;
+import com.sun.tools.javac.util.Name;
 
 /**
  * This is a TypeScript printer for translating the Java AST to a TypeScript
@@ -111,7 +126,89 @@ import com.sun.tools.javac.tree.TreeScanner;
  */
 public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
-	private boolean skipTypeAnnotations = false;
+	public static final String PARENT_CLASS_FIELD_NAME = "__parent";
+	public static final String INTERFACES_FIELD_NAME = "__interfaces";
+	public static final String STATIC_INITIALIZATION_SUFFIX = "_$LI$";
+	public static final String CLASS_NAME_IN_CONSTRUCTOR = "__class";
+	public static final String ANONYMOUS_PREFIX = "$";
+	public static final String ENUM_WRAPPER_CLASS_SUFFIX = "_$WRAPPER";
+	public static final String ENUM_WRAPPER_CLASS_WRAPPERS = "_$wrappers";
+	public static final String ENUM_WRAPPER_CLASS_NAME = "_$name";
+	public static final String ENUM_WRAPPER_CLASS_ORDINAL = "_$ordinal";
+	public static final String VAR_DECL_KEYWORD = "let";
+
+	protected static Logger logger = Logger.getLogger(Java2TypeScriptTranslator.class);
+
+	private static class ClassScope {
+		private String name;
+
+		private boolean interfaceScope = false;
+
+		private boolean sharedMode = false;
+
+		private boolean enumScope = false;
+
+		private boolean isComplexEnum = false;
+
+		private boolean enumWrapperClassScope = false;
+
+		private List<String> javaEnumKeys;
+
+		private boolean removedSuperclass = false;
+
+		private boolean declareClassScope;
+
+		private boolean skipTypeAnnotations = false;
+
+		private boolean defaultMethodScope = false;
+
+		private boolean eraseVariableTypes = false;
+
+		private boolean hasDeclaredConstructor = false;
+
+		private boolean innerClass = false;
+
+		private boolean innerClassNotStatic = false;
+
+		private boolean hasInnerClass = false;
+
+		private List<JCClassDecl> anonymousClasses = new ArrayList<>();
+
+		private List<JCNewClass> anonymousClassesConstructors = new ArrayList<>();
+
+		private List<LinkedHashSet<VarSymbol>> finalVariables = new ArrayList<>();
+
+		private boolean hasConstructorOverloadWithSuperClass;
+
+		private List<JCVariableDecl> fieldsWithInitializers = new ArrayList<>();
+
+		private List<String> inlinedConstructorArgs = null;
+
+	}
+
+	private boolean isAnonymousClass = false;
+
+	private Stack<ClassScope> scope = new Stack<>();
+
+	private boolean isAnnotationScope = false;
+
+	private boolean isDefinitionScope = false;
+
+	private ClassScope getScope() {
+		return scope.peek();
+	}
+
+	private ClassScope getScope(int i) {
+		return scope.get(scope.size() - 1 - i);
+	}
+
+	public void enterScope() {
+		scope.push(new ClassScope());
+	}
+
+	public void exitScope() {
+		scope.pop();
+	}
 
 	/**
 	 * Creates a new TypeScript translator.
@@ -128,68 +225,110 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 	 */
 	public Java2TypeScriptTranslator(TranspilationHandler logHandler, JSweetContext context, JCCompilationUnit compilationUnit,
 			boolean preserveSourceLineNumbers) {
-		super(logHandler, context, compilationUnit, new Java2TypeScriptAdapter(), preserveSourceLineNumbers);
-	}
-
-	/**
-	 * '.ts' for TypeScript output.
-	 */
-	@Override
-	public String getTargetFilesExtension() {
-		return ".ts";
+		super(logHandler, context, compilationUnit, new Java2TypeScriptAdapter(context), preserveSourceLineNumbers);
 	}
 
 	private static java.util.List<Class<?>> statementsWithNoSemis = Arrays
 			.asList(new Class<?>[] { JCIf.class, JCForLoop.class, JCEnhancedForLoop.class, JCSwitch.class });
 
-	private List<String> compilationUnitMainCalls = new LinkedList<String>();
-	private JCMethodDecl mainMethod;
+	public static final Map<String, String> TYPE_MAPPING;
+	static {
+		Map<String, String> mapping = new HashMap<>();
+		mapping.put("java.lang.String", "String");
+		mapping.put("java.lang.Number", "Number");
+		mapping.put("java.lang.Integer", "Number");
+		mapping.put("java.lang.Float", "Number");
+		mapping.put("java.lang.Double", "Number");
+		mapping.put("java.lang.Short", "Number");
+		mapping.put("java.lang.Character", "String");
+		mapping.put("java.lang.Byte", "Number");
+		mapping.put("java.lang.Boolean", "Boolean");
+		mapping.put("java.lang.Long", "Number");
+		mapping.put("int", "Number");
+		mapping.put("float", "Number");
+		mapping.put("double", "Number");
+		mapping.put("short", "Number");
+		mapping.put("char", "String");
+		mapping.put("boolean", "Boolean");
+		mapping.put("byte", "Number");
+		mapping.put("long", "Number");
+		TYPE_MAPPING = Collections.unmodifiableMap(mapping);
+	}
 
-	private List<JCImport> imports = new ArrayList<JCImport>();
+	private JCMethodDecl mainMethod;
 
 	private boolean globalModule = false;
 
 	private PackageSymbol topLevelPackage;
 
-	private void useModule(PackageSymbol targetPackage, JCTree sourceTree, String targetName, String moduleName) {
+	private void useModule(boolean require, PackageSymbol targetPackage, JCTree sourceTree, String targetName, String moduleName, Symbol sourceElement) {
 		if (context.useModules) {
 			context.packageDependencies.add(targetPackage);
 			context.packageDependencies.add(compilationUnit.packge);
 			context.packageDependencies.addEdge(compilationUnit.packge, targetPackage);
 		}
 		context.registerUsedModule(moduleName);
-		Set<String> importedNames = context.getImportedNames(compilationUnit.packge);
+		Set<String> importedNames = context.getImportedNames(compilationUnit.getSourceFile().getName());
 		if (!importedNames.contains(targetName)) {
 			if (context.useModules) {
-				print("import " + targetName + " = require(\"" + moduleName + "\"); ").println();
+				// TODO: when using several qualified Globals classes, we need
+				// to disambiguate (Globals__1, Globals__2, ....)
+				// TODO: IDEA FOR MODULES AND FULLY QUALIFIED NAMES
+				// when using a fully qualified name in the code, we need an
+				// import, which can be named after something like
+				// qualName.replace(".", "_")... this would work in the general
+				// case...
+				if (require || GLOBALS_CLASS_NAME.equals(targetName)) {
+					print("import " + targetName + " = require(\"" + moduleName + "\"); ").println();
+				} else {
+					print("import { " + targetName + " } from '" + moduleName + "'; ").println();
+				}
 			}
-			importedNames.add(targetName);
+			context.registerImportedName(compilationUnit.getSourceFile().getName(), sourceElement, targetName);
 		}
 	}
 
-	private void checkRootPackageParent(JCCompilationUnit topLevel, PackageSymbol rootPackage, PackageSymbol parentPackage) {
+	private boolean checkRootPackageParent(JCCompilationUnit topLevel, PackageSymbol rootPackage, PackageSymbol parentPackage) {
 		if (parentPackage == null) {
-			return;
+			return true;
 		}
 		if (Util.hasAnnotationType(parentPackage, JSweetConfig.ANNOTATION_ROOT)) {
 			report(topLevel.getPackageName(), JSweetProblem.ENCLOSED_ROOT_PACKAGES, rootPackage.getQualifiedName().toString(),
 					parentPackage.getQualifiedName().toString());
+			return false;
 		}
 		for (Symbol s : parentPackage.getEnclosedElements()) {
-			if (!(s instanceof PackageSymbol)) {
-				report(topLevel.getPackageName(), JSweetProblem.CLASS_OUT_OF_ROOT_PACKAGE_SCOPE, s.getQualifiedName().toString(),
-						rootPackage.getQualifiedName().toString());
+			if (s instanceof ClassSymbol) {
+				if (Util.isSourceType((ClassSymbol) s)) {
+					report(topLevel.getPackageName(), JSweetProblem.CLASS_OUT_OF_ROOT_PACKAGE_SCOPE, s.getQualifiedName().toString(),
+							rootPackage.getQualifiedName().toString());
+					return false;
+				}
 			}
 		}
-		checkRootPackageParent(topLevel, rootPackage, (PackageSymbol) parentPackage.owner);
+		return checkRootPackageParent(topLevel, rootPackage, (PackageSymbol) parentPackage.owner);
 	}
 
 	@Override
 	public void visitTopLevel(JCCompilationUnit topLevel) {
-		printIndent().print("\"Generated from Java with JSweet " + JSweetConfig.getVersionNumber() + " - http://www.jsweet.org\";").println();
+
+		isDefinitionScope = topLevel.packge.getQualifiedName().toString().startsWith("def.");
+
+		printIndent().print("/* Generated from Java with JSweet " + JSweetConfig.getVersionNumber() + " - http://www.jsweet.org */").println();
 		PackageSymbol rootPackage = Util.getFirstEnclosingRootPackage(topLevel.packge);
 		if (rootPackage != null) {
-			checkRootPackageParent(topLevel, rootPackage, (PackageSymbol) rootPackage.owner);
+			if (!checkRootPackageParent(topLevel, rootPackage, (PackageSymbol) rootPackage.owner)) {
+				return;
+			}
+		}
+		context.importedTopPackages.clear();
+		context.rootPackages.add(rootPackage);
+		if (context.useModules && context.rootPackages.size() > 1) {
+			if (!context.reportedMultipleRootPackages) {
+				report(topLevel.getPackageName(), JSweetProblem.MULTIPLE_ROOT_PACKAGES_NOT_ALLOWED_WITH_MODULES, context.rootPackages.toString());
+				context.reportedMultipleRootPackages = true;
+			}
+			return;
 		}
 
 		topLevelPackage = Util.getTopLevelPackage(topLevel.packge);
@@ -199,7 +338,8 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 		footer.delete(0, footer.length());
 
-		imports.clear();
+		setCompilationUnit(topLevel);
+
 		String packge = topLevel.packge.toString();
 
 		globalModule = JSweetConfig.GLOBALS_PACKAGE_NAME.equals(packge) || packge.endsWith("." + JSweetConfig.GLOBALS_PACKAGE_NAME);
@@ -217,36 +357,6 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 			report(topLevel.getPackageName(), JSweetProblem.PACKAGE_NAME_CONTAINS_KEYWORD, packageSegments);
 		}
 
-		if (!context.useModules) {
-			context.clearImportedNames(compilationUnit.packge);
-		}
-
-		if (context.useModules) {
-			// export-import submodules
-			File parent = new File(compilationUnit.getSourceFile().getName()).getParentFile();
-			for (File file : parent.listFiles()) {
-				if (file.isDirectory() && !file.getName().startsWith(".")) {
-					boolean containsSourceFile = false;
-					for (File child : file.listFiles()) {
-						for (File sourceFile : SourceFile.toFiles(context.sourceFiles)) {
-							if (child.getAbsolutePath().equals(sourceFile.getAbsolutePath())) {
-								containsSourceFile = true;
-								break;
-							}
-						}
-					}
-					if (containsSourceFile) {
-						Set<String> importedNames = context.getImportedNames(compilationUnit.packge);
-						if (!importedNames.contains(file.getName())) {
-							print("export import " + file.getName() + " = require('./" + file.getName() + "/" + JSweetConfig.MODULE_FILE_NAME + "');")
-									.println();
-							importedNames.add(file.getName());
-						}
-					}
-				}
-			}
-		}
-
 		// generate requires by looking up imported external modules
 
 		for (JCImport importDecl : topLevel.getImports()) {
@@ -260,7 +370,7 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 							// regular import case (qualified.sym is a package)
 							if (Util.hasAnnotationType(qualified.sym, JSweetConfig.ANNOTATION_MODULE)) {
 								String actualName = Util.getAnnotationValue(qualified.sym, JSweetConfig.ANNOTATION_MODULE, null);
-								useModule(null, importDecl, qualified.name.toString(), actualName);
+								useModule(true, null, importDecl, qualified.name.toString(), actualName, ((PackageSymbol) qualified.sym));
 							}
 						} else {
 							// static import case (imported fields and methods)
@@ -272,7 +382,7 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 											if (qualified.name.equals(importedMember.getSimpleName())) {
 												if (Util.hasAnnotationType(importedMember, JSweetConfig.ANNOTATION_MODULE)) {
 													String actualName = Util.getAnnotationValue(importedMember, JSweetConfig.ANNOTATION_MODULE, null);
-													useModule(null, importDecl, importedMember.getSimpleName().toString(), actualName);
+													useModule(true, null, importDecl, importedMember.getSimpleName().toString(), actualName, importedMember);
 													break;
 												}
 											}
@@ -298,30 +408,66 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		for (JCImport importDecl : topLevel.getImports()) {
 			if (importDecl.qualid instanceof JCFieldAccess) {
 				JCFieldAccess qualified = (JCFieldAccess) importDecl.qualid;
+				String importedName = qualified.name.toString();
 				if (importDecl.isStatic() && (qualified.selected instanceof JCFieldAccess)) {
 					qualified = (JCFieldAccess) qualified.selected;
 				}
 				if (qualified.sym instanceof ClassSymbol) {
 					ClassSymbol importedClass = (ClassSymbol) qualified.sym;
-					if (Util.isSourceType(importedClass)) {
-						PackageSymbol targetRootPackage = Util.getTopLevelPackage(importedClass);
-						if (targetRootPackage == null) {
+					if (Util.isSourceType(importedClass) && !importedClass.getQualifiedName().toString().startsWith(JSweetConfig.LIBS_PACKAGE + ".")) {
+						String importedModule = importedClass.sourcefile.getName();
+						if (importedModule.equals(compilationUnit.sourcefile.getName())) {
 							continue;
 						}
-						String targetRootPackageName = targetRootPackage.getSimpleName().toString();
-						String pathToReachRootPackage = Util.getRelativePath("/" + Util.getRootRelativeJavaName(compilationUnit.packge).replace('.', '/'),
-								"/" + targetRootPackageName);
-						if (pathToReachRootPackage == null) {
-							pathToReachRootPackage = ".";
-							// continue;
+						String pathToImportedClass = Util.getRelativePath(new File(compilationUnit.sourcefile.getName()).getParent(), importedModule);
+						pathToImportedClass = pathToImportedClass.substring(0, pathToImportedClass.length() - 5);
+						if (!pathToImportedClass.startsWith(".")) {
+							pathToImportedClass = "./" + pathToImportedClass;
 						}
-						File moduleFile = new File(new File(pathToReachRootPackage), JSweetConfig.MODULE_FILE_NAME);
-						useModule((PackageSymbol) qualified.sym.getEnclosingElement(), importDecl, targetRootPackageName,
-								moduleFile.getPath().replace('\\', '/'));
+
+						Symbol symbol = qualified.sym.getEnclosingElement();
+						while (!(symbol instanceof PackageSymbol)) {
+							importedName = symbol.getSimpleName().toString();
+							symbol = symbol.getEnclosingElement();
+						}
+						if (symbol != null) {
+							useModule(false, (PackageSymbol) symbol, importDecl, importedName, pathToImportedClass.replace('\\', '/'), null);
+						}
 					}
 				}
 			}
 		}
+
+		if (context.useModules) {
+			TreeScanner usedTypesScanner = new TreeScanner() {
+
+				private void checkType(TypeSymbol type) {
+					if (type instanceof ClassSymbol) {
+						if (type.getEnclosingElement().equals(compilationUnit.packge)) {
+							String importedModule = ((ClassSymbol) type).sourcefile.getName();
+							if (!importedModule.equals(compilationUnit.sourcefile.getName())) {
+								importedModule = "./" + new File(importedModule).getName();
+								importedModule = importedModule.substring(0, importedModule.length() - 5);
+								useModule(false, (PackageSymbol) type.getEnclosingElement(), null, type.getSimpleName().toString(), importedModule, null);
+							}
+						}
+					}
+				}
+
+				@Override
+				public void scan(JCTree t) {
+					if (t != null && t.type != null && t.type.tsym instanceof ClassSymbol) {
+						if (!(t instanceof JCTypeApply)) {
+							checkType(t.type.tsym);
+						}
+					}
+					super.scan(t);
+				}
+
+			};
+			usedTypesScanner.scan(compilationUnit);
+		}
+
 		// require root modules when using fully qualified names or reserved
 		// keywords
 		TreeScanner inlinedModuleScanner = new TreeScanner() {
@@ -377,7 +523,8 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 					}
 					File moduleFile = new File(new File(pathToModulePackage), JSweetConfig.MODULE_FILE_NAME);
 					if (!identifierPackage.getSimpleName().toString().equals(compilationUnit.packge.getSimpleName().toString())) {
-						useModule(identifierPackage, identifier, identifierPackage.getSimpleName().toString(), moduleFile.getPath().replace('\\', '/'));
+						useModule(false, identifierPackage, identifier, identifierPackage.getSimpleName().toString(), moduleFile.getPath().replace('\\', '/'),
+								null);
 					}
 				} else if (identifier.sym instanceof ClassSymbol) {
 					if (JSweetConfig.GLOBALS_PACKAGE_NAME.equals(identifier.sym.getEnclosingElement().getSimpleName().toString())) {
@@ -387,8 +534,8 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 						}
 						File moduleFile = new File(new File(pathToModulePackage), JSweetConfig.MODULE_FILE_NAME);
 						if (!identifier.sym.getEnclosingElement().equals(compilationUnit.packge.getSimpleName().toString())) {
-							useModule((PackageSymbol) identifier.sym.getEnclosingElement(), identifier, JSweetConfig.GLOBALS_PACKAGE_NAME,
-									moduleFile.getPath().replace('\\', '/'));
+							useModule(false, (PackageSymbol) identifier.sym.getEnclosingElement(), identifier, JSweetConfig.GLOBALS_PACKAGE_NAME,
+									moduleFile.getPath().replace('\\', '/'), null);
 						}
 					}
 				}
@@ -399,7 +546,7 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 				// TODO: same for static variables
 				if (invocation.meth instanceof JCIdent && JSweetConfig.TS_STRICT_MODE_KEYWORDS.contains(invocation.meth.toString().toLowerCase())) {
 					PackageSymbol invocationPackage = (PackageSymbol) ((JCIdent) invocation.meth).sym.getEnclosingElement().getEnclosingElement();
-					String rootRelativeInvocationPackageName = Util.getRootRelativeName(invocationPackage);
+					String rootRelativeInvocationPackageName = getRootRelativeName(invocationPackage);
 					if (rootRelativeInvocationPackageName.indexOf('.') == -1) {
 						super.visitApply(invocation);
 						return;
@@ -413,20 +560,24 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 					}
 					File moduleFile = new File(new File(pathToReachRootPackage), JSweetConfig.MODULE_FILE_NAME);
 					if (!invocationPackage.toString().equals(compilationUnit.packge.getSimpleName().toString())) {
-						useModule(invocationPackage, invocation, targetRootPackageName, moduleFile.getPath().replace('\\', '/'));
+						useModule(false, invocationPackage, invocation, targetRootPackageName, moduleFile.getPath().replace('\\', '/'), null);
 					}
 				}
 				super.visitApply(invocation);
 			}
 
 		};
-		inlinedModuleScanner.scan(compilationUnit);
+		// TODO: change the way qualified names are handled (because of new
+		// module organization)
+		// inlinedModuleScanner.scan(compilationUnit);
 
 		if (!globalModule && !context.useModules) {
-			printIndent().print("module ").print(rootRelativePackageName).print(" {").startIndent().println();
+			printIndent();
+			if (isDefinitionScope) {
+				print("declare ");
+			}
+			print("namespace ").print(rootRelativePackageName).print(" {").startIndent().println();
 		}
-
-		compilationUnitMainCalls.clear();
 
 		for (JCTree def : topLevel.defs) {
 			mainMethod = null;
@@ -441,145 +592,554 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 			println().println();
 		}
 		if (!globalModule && !context.useModules) {
-			removeLastChar().endIndent().printIndent().print("}");
+			removeLastChar().endIndent().printIndent().print("}").println();
 		}
 
 		if (footer.length() > 0) {
 			println().print(footer.toString());
 		}
-		for (String mainMethodCall : compilationUnitMainCalls) {
-			println().print(mainMethodCall).println();
-		}
+
 		globalModule = false;
+
 	}
 
-	private boolean interfaceScope = false;
+	private void printDocComment(JCTree element, boolean indent) {
+		if (compilationUnit != null && compilationUnit.docComments != null && compilationUnit.docComments.hasComment(element)) {
+			Comment comment = compilationUnit.docComments.getComment(element);
+			String[] lines = comment.getText().split("\n");
+			if (isPreserveLineNumbers()) {
+				print("/**").print("\n");
+				for (String line : lines) {
+					print(" * ").print(line.trim()).print("\n");
+				}
+				print(" ").print("*/\n");
+			} else {
+				if (indent) {
+					printIndent();
+				}
+				print("/**").println();
+				for (String line : lines) {
+					printIndent().print(" * ").print(line.trim()).print("\n");
+				}
+				removeLastChar();
+				println().printIndent().print(" ").print("*/\n");
+				if (!indent) {
+					printIndent();
+				}
+			}
+		}
+	}
 
-	private boolean enumScope = false;
+	private void printAnonymousClassTypeArgs(JCNewClass newClass) {
+		if ((newClass.clazz instanceof JCTypeApply)) {
+			JCTypeApply tapply = (JCTypeApply) newClass.clazz;
+			if (tapply.getTypeArguments() != null && !tapply.getTypeArguments().isEmpty()) {
+				boolean printed = false;
+				print("<");
+				for (JCExpression targ : tapply.getTypeArguments()) {
+					if (targ.type.tsym instanceof TypeVariableSymbol) {
+						printed = true;
+						print(targ).print(", ");
+					}
+				}
+				if (printed) {
+					removeLastChars(2);
+					print(">");
+				} else {
+					removeLastChar();
+				}
+			}
+		}
+	}
 
-	private boolean removedSuperclass = false;
-
-	private boolean declareClassScope;
+	private boolean isIgnored(JCClassDecl classdecl) {
+		if (Util.hasAnnotationType(classdecl.type.tsym, JSweetConfig.ANNOTATION_OBJECT_TYPE)) {
+			// object types are ignored
+			return true;
+		}
+		if (Util.hasAnnotationType(classdecl.type.tsym, JSweetConfig.ANNOTATION_ERASED)) {
+			// erased types are ignored
+			return true;
+		}
+		if (classdecl.type.tsym.getKind() == ElementKind.ANNOTATION_TYPE) {
+			// annotation types are ignored
+			return true;
+		}
+		return false;
+	}
 
 	@Override
 	public void visitClassDef(JCClassDecl classdecl) {
-		if (getParent() instanceof JCClassDecl) {
-			report(classdecl, JSweetProblem.INNER_CLASS, classdecl.name);
+		if (isIgnored(classdecl)) {
 			return;
 		}
+		String name = classdecl.getSimpleName().toString();
+		if (!scope.isEmpty() && getScope().anonymousClasses.contains(classdecl)) {
+			name = getScope().name + ANONYMOUS_PREFIX + getScope().anonymousClasses.indexOf(classdecl);
+		}
+		enterScope();
+		getScope().name = name;
 
-		declareClassScope = Util.hasAnnotationType(classdecl.sym, JSweetConfig.ANNOTATION_AMBIENT);
-		interfaceScope = false;
-		removedSuperclass = false;
-		enumScope = false;
+		JCClassDecl parent = getParent(JCClassDecl.class);
+		List<TypeVariableSymbol> parentTypeVars = new ArrayList<>();
+		if (parent != null) {
+			getScope().innerClass = true;
+			if (!classdecl.getModifiers().getFlags().contains(Modifier.STATIC)) {
+				getScope().innerClassNotStatic = true;
+				if (parent.getTypeParameters() != null) {
+					parentTypeVars.addAll(parent.getTypeParameters().stream().map(t -> (TypeVariableSymbol) t.type.tsym).collect(Collectors.toList()));
+					getAdapter().typeVariablesToErase.addAll(parentTypeVars);
+				}
+			}
+		}
+		getScope().declareClassScope = Util.hasAnnotationType(classdecl.sym, JSweetConfig.ANNOTATION_AMBIENT) || isDefinitionScope;
+		getScope().interfaceScope = false;
+		getScope().removedSuperclass = false;
+		getScope().enumScope = false;
+		getScope().enumWrapperClassScope = false;
+
+		HashSet<Entry<JCClassDecl, JCMethodDecl>> defaultMethods = null;
 		boolean globals = JSweetConfig.GLOBALS_CLASS_NAME.equals(classdecl.name.toString());
+		if (globals && classdecl.extending != null) {
+			report(classdecl, JSweetProblem.GLOBALS_CLASS_CANNOT_HAVE_SUPERCLASS);
+		}
+		List<Type> implementedInterfaces = new ArrayList<>();
+
 		if (!globals) {
-			if (!globalModule) {
+			if (classdecl.extending != null && JSweetConfig.GLOBALS_CLASS_NAME.equals(classdecl.extending.type.tsym.getSimpleName().toString())) {
+				report(classdecl, JSweetProblem.GLOBALS_CLASS_CANNOT_BE_SUBCLASSED);
+				return;
+			}
+			printDocComment(classdecl, false);
+			print(classdecl.mods);
+			if (!globalModule || context.useModules || isAnonymousClass) {
 				print("export ");
 			}
 			if (Util.isInterface(classdecl.sym)) {
 				print("interface ");
-				interfaceScope = true;
+				getScope().interfaceScope = true;
+				Object o = Util.getAnnotationValue(classdecl.sym, JSweetConfig.ANNOTATION_INTERFACE, null);
+				getScope().sharedMode = ("" + o).endsWith("SHARED");
 			} else {
 				if (classdecl.getKind() == Kind.ENUM) {
-					enumScope = true;
-					print("enum ");
+					if (scope.size() > 1 && getScope(1).isComplexEnum) {
+						print("class ");
+						getScope().enumWrapperClassScope = true;
+						getScope().javaEnumKeys = new ArrayList<>();
+					} else {
+						print("enum ");
+						getScope().enumScope = true;
+					}
 				} else {
-					if (declareClassScope) {
+					if (getScope().declareClassScope && !(getIndent() != 0 && isDefinitionScope)) {
 						print("declare ");
 					}
-
+					defaultMethods = new HashSet<>();
+					Util.findDefaultMethodsInType(defaultMethods, context, classdecl.sym);
+					if (classdecl.getModifiers().getFlags().contains(Modifier.ABSTRACT)) {
+						print("abstract ");
+					}
 					print("class ");
 				}
 			}
-			print(classdecl.name.toString());
-			if (interfaceScope && classdecl.getKind() == Kind.CLASS) {
-				if (!classdecl.mods.getFlags().contains(Modifier.ABSTRACT)) {
-					report(classdecl, JSweetProblem.INTERFACE_MUST_BE_ABSTRACT, classdecl.name);
-				}
-			}
+
+			print(name + (getScope().enumWrapperClassScope ? ENUM_WRAPPER_CLASS_SUFFIX : ""));
+
 			if (classdecl.typarams != null && classdecl.typarams.size() > 0) {
 				print("<").printArgList(classdecl.typarams).print(">");
+			} else if (isAnonymousClass && classdecl.getModifiers().getFlags().contains(Modifier.STATIC)) {
+				JCNewClass newClass = getScope(1).anonymousClassesConstructors.get(getScope(1).anonymousClasses.indexOf(classdecl));
+				printAnonymousClassTypeArgs(newClass);
 			}
+			boolean extendsInterface = false;
 			if (classdecl.extending != null) {
 				if (!JSweetConfig.isJDKReplacementMode() && !(JSweetConfig.OBJECT_CLASSNAME.equals(classdecl.extending.type.toString())
 						|| Object.class.getName().equals(classdecl.extending.type.toString()))) {
-					if (!interfaceScope && Util.isInterface(classdecl.extending.type.tsym)) {
+					if (!getScope().interfaceScope && Util.isInterface(classdecl.extending.type.tsym)) {
+						extendsInterface = true;
 						print(" implements ");
+						implementedInterfaces.add(classdecl.extending.type);
 					} else {
 						print(" extends ");
 					}
-					print(classdecl.extending);
+					getAdapter().disableTypeSubstitution = true;
+					getAdapter().substituteAndPrintType(classdecl.extending);
+					getAdapter().disableTypeSubstitution = false;
+					if (context.classesWithWrongConstructorOverload.contains(classdecl.sym)) {
+						getScope().hasConstructorOverloadWithSuperClass = true;
+					}
 				} else {
-					removedSuperclass = true;
+					getScope().removedSuperclass = true;
 				}
+			}
+			if (classdecl.implementing != null && !classdecl.implementing.isEmpty()) {
+				if (!extendsInterface) {
+					if (getScope().interfaceScope) {
+						print(" extends ");
+					} else {
+						print(" implements ");
+					}
+				} else {
+					print(", ");
+				}
+				for (JCExpression itf : classdecl.implementing) {
+					getAdapter().disableTypeSubstitution = true;
+					getAdapter().substituteAndPrintType(itf);
+					getAdapter().disableTypeSubstitution = false;
+					implementedInterfaces.add(itf.type);
+					print(", ");
+				}
+				removeLastChars(2);
 			}
 			print(" {").println().startIndent();
 		}
 
+		if (getScope().innerClassNotStatic && !getScope().interfaceScope && !getScope().enumScope) {
+			printIndent().print("public " + PARENT_CLASS_FIELD_NAME + ": any;").println();
+		}
+
+		if (defaultMethods != null && !defaultMethods.isEmpty()) {
+			getScope().defaultMethodScope = true;
+			for (Entry<JCClassDecl, JCMethodDecl> entry : defaultMethods) {
+				MethodSymbol s = Util.findMethodDeclarationInType(context.types, classdecl.sym, entry.getValue().getName().toString(),
+						(MethodType) entry.getValue().type);
+				if (s == null || s == entry.getValue().sym) {
+					getAdapter().typeVariablesToErase.addAll(((ClassSymbol) s.getEnclosingElement()).getTypeParameters());
+					printIndent().print(entry.getValue()).println();
+					getAdapter().typeVariablesToErase.removeAll(((ClassSymbol) s.getEnclosingElement()).getTypeParameters());
+				}
+			}
+			getScope().defaultMethodScope = false;
+		}
+
+		if (getScope().enumScope) {
+			printIndent();
+		}
+		if (globals) {
+			removeLastIndent();
+		}
+
+		if (!getScope().interfaceScope && classdecl.getModifiers().getFlags().contains(Modifier.ABSTRACT)) {
+			List<MethodSymbol> methods = new ArrayList<>();
+			for (Type t : implementedInterfaces) {
+				Util.grabMethodsToBeImplemented(methods, t.tsym);
+			}
+			Map<Name, String> signatures = new HashMap<>();
+			for (MethodSymbol meth : methods) {
+				if (meth.type instanceof MethodType) {
+					MethodSymbol s = Util.findMethodDeclarationInType(getContext().types, classdecl.sym, meth.getSimpleName().toString(),
+							(MethodType) meth.type, true);
+					boolean printDefaultImplementation = false;
+					if (s != null) {
+						if (!s.getEnclosingElement().equals(classdecl.sym)) {
+							if (!(s.isDefault()
+									|| (!Util.isInterface((TypeSymbol) s.getEnclosingElement()) && !s.getModifiers().contains(Modifier.ABSTRACT)))) {
+								printDefaultImplementation = true;
+							}
+						}
+					}
+					if (printDefaultImplementation) {
+						Overload o = context.getOverload(classdecl.sym, meth);
+						if (o != null && o.methods.size() > 1 && !o.isValid) {
+							if (!meth.type.equals(o.coreMethod.type)) {
+								printDefaultImplementation = false;
+							}
+						}
+					}
+					if (s == null || printDefaultImplementation) {
+						String signature = getContext().types.erasure(meth.type).toString();
+						if (!(signatures.containsKey(meth.name) && signatures.get(meth.name).equals(signature))) {
+							printDefaultImplementation(meth);
+							signatures.put(meth.name, signature);
+						}
+					}
+				}
+			}
+		}
+
 		for (JCTree def : classdecl.defs) {
+			if (def instanceof JCClassDecl) {
+				getScope().hasInnerClass = true;
+			}
 			if (def instanceof JCVariableDecl) {
-				if (enumScope && ((JCVariableDecl) def).type.tsym != classdecl.type.tsym) {
-					report(def, ((JCVariableDecl) def).name, JSweetProblem.INVALID_FIELD_IN_ENUM);
+				JCVariableDecl var = (JCVariableDecl) def;
+				if (!var.sym.isStatic() && var.init != null) {
+					getScope().fieldsWithInitializers.add((JCVariableDecl) def);
+				}
+			}
+		}
+
+		if (!globals && !Util.isInterface(classdecl.sym) && context.getStaticInitializerCount(classdecl.sym) > 0) {
+			printIndent().print("static __static_initialized : boolean = false;").println();
+			int liCount = context.getStaticInitializerCount(classdecl.sym);
+			String prefix = classdecl.getSimpleName().toString() + ".";
+			printIndent().print("static __static_initialize() { ");
+			print("if(!" + prefix + "__static_initialized) { ");
+			print(prefix + "__static_initialized = true; ");
+			for (int i = 0; i < liCount; i++) {
+				print(prefix + "__static_initializer_" + i + "(); ");
+			}
+			print("} }").println().println();
+			String qualifiedClassName = getQualifiedTypeName(classdecl.sym, globals);
+			context.addTopFooterStatement((isBlank(qualifiedClassName) ? "" : qualifiedClassName + ".__static_initialize();"));
+		}
+
+		boolean hasUninitializedFields = false;
+
+		for (JCTree def : classdecl.defs) {
+			if (!getScope().sharedMode && getScope().interfaceScope && ((def instanceof JCMethodDecl && ((JCMethodDecl) def).sym.isStatic())
+					|| (def instanceof JCVariableDecl && ((JCVariableDecl) def).sym.isStatic()))) {
+				// static interface members are printed in a namespace
+				continue;
+			}
+			if (def instanceof JCClassDecl) {
+				// inner types are be printed in a namespace
+				continue;
+			}
+			if (def instanceof JCVariableDecl) {
+				if (getScope().enumScope && ((JCVariableDecl) def).type.tsym != classdecl.type.tsym) {
+					getScope().isComplexEnum = true;
 					continue;
 				}
 				if (!getAdapter().needsVariableDecl((JCVariableDecl) def, VariableKind.FIELD)) {
 					continue;
 				}
+				if (!((JCVariableDecl) def).getModifiers().getFlags().contains(Modifier.STATIC) && ((JCVariableDecl) def).init == null) {
+					hasUninitializedFields = true;
+				}
 			}
-			printIndent();
+			if (def instanceof JCBlock && !((JCBlock) def).isStatic()) {
+				hasUninitializedFields = true;
+			}
+			if (!getScope().enumScope) {
+				printIndent();
+			}
 			int pos = getCurrentPosition();
 			print(def);
 			if (getCurrentPosition() == pos) {
-				removeLastIndent();
+				if (!getScope().enumScope) {
+					removeLastIndent();
+				}
 				continue;
 			}
-			if (def instanceof JCVariableDecl) {
-				if (enumScope) {
-					print(",");
+			if (def instanceof JCVariableDecl && !(getScope().sharedMode && ((JCVariableDecl) def).getModifiers().getFlags().contains(Modifier.STATIC))) {
+				if (getScope().enumScope) {
+					print(", ");
 				} else {
-					print(";");
-					println();
-					println();
+					print(";").println().println();
 				}
 			} else {
-				println();
-				println();
+				println().println();
 			}
-		}
-		if (!globals) {
-			removeLastChar().endIndent().printIndent().print("}");
 		}
 
-		if (mainMethod != null && mainMethod.getParameters().size() < 2) {
-			String mainClassName = getRootRelativeName(classdecl.sym);
-			if (context.useModules) {
-				int dotIndex = mainClassName.lastIndexOf(".");
-				mainClassName = mainClassName.substring(dotIndex + 1);
+		if (!getScope().hasDeclaredConstructor && !(getScope().interfaceScope || getScope().enumScope || getScope().declareClassScope)) {
+			Set<String> interfaces = new HashSet<>();
+			Util.grabSupportedInterfaceNames(interfaces, classdecl.sym);
+			if (!interfaces.isEmpty() || getScope().innerClassNotStatic || hasUninitializedFields) {
+				printIndent().print("constructor(");
+				boolean hasArgs = false;
+				if (getScope().innerClassNotStatic) {
+					print(PARENT_CLASS_FIELD_NAME + ": any");
+					hasArgs = true;
+				}
+				int anonymousClassIndex = scope.size() > 1 ? getScope(1).anonymousClasses.indexOf(classdecl) : -1;
+				if (anonymousClassIndex != -1) {
+					for (int i = 0; i < getScope(1).anonymousClassesConstructors.get(anonymousClassIndex).args.length(); i++) {
+						if (!hasArgs) {
+							hasArgs = true;
+						} else {
+							print(", ");
+						}
+						print("__arg" + i + ": any");
+					}
+					for (VarSymbol v : getScope(1).finalVariables.get(anonymousClassIndex)) {
+						if (!hasArgs) {
+							hasArgs = true;
+						} else {
+							print(", ");
+						}
+						print("private " + v.getSimpleName() + ": any");
+					}
+				}
+
+				print(") {").startIndent().println();
+				if (classdecl.extending != null && !getScope().removedSuperclass && !Util.isInterface(classdecl.extending.type.tsym)) {
+					printIndent().print("super(");
+					if (getScope().innerClassNotStatic) {
+						TypeSymbol s = classdecl.extending.type.tsym;
+						boolean hasArg = false;
+						if (s.getEnclosingElement() instanceof ClassSymbol && !s.isStatic()) {
+							print(PARENT_CLASS_FIELD_NAME);
+							hasArg = true;
+						}
+						if (anonymousClassIndex != -1) {
+							for (int i = 0; i < getScope(1).anonymousClassesConstructors.get(anonymousClassIndex).args.length(); i++) {
+								if (hasArg) {
+									print(", ");
+								} else {
+									hasArg = true;
+								}
+								print("__arg" + i);
+							}
+						}
+					}
+					print(");").println();
+				}
+				printInstanceInitialization(classdecl, null);
+				endIndent().printIndent().print("}").println().println();
 			}
-			if (globals) {
-				int dotIndex = mainClassName.lastIndexOf(".");
-				if (dotIndex == -1) {
-					mainClassName = "";
-				} else {
-					mainClassName = mainClassName.substring(0, dotIndex);
+		}
+
+		removeLastChar();
+
+		if (getScope().enumWrapperClassScope) {
+			printIndent().print("public name() : string { return this." + ENUM_WRAPPER_CLASS_NAME + "; }").println();
+			printIndent().print("public ordinal() : number { return this." + ENUM_WRAPPER_CLASS_ORDINAL + "; }").println();
+		}
+
+		if (getScope().enumScope) {
+			removeLastChar().println();
+		}
+
+		if (!globals) {
+			endIndent().printIndent().print("}");
+			if (getContext().options.isSupportGetClass() && !getScope().interfaceScope && !getScope().declareClassScope && !getScope().enumScope
+					&& !classdecl.sym.isAnonymous()) {
+				println().printIndent().print(classdecl.sym.getSimpleName().toString()).print("[\"" + CLASS_NAME_IN_CONSTRUCTOR + "\"] = ")
+						.print("\"" + Util.getRootRelativeName(null, classdecl.sym) + "\";");
+
+				Set<String> interfaces = new HashSet<>();
+				Util.grabSupportedInterfaceNames(interfaces, classdecl.sym);
+				if (!interfaces.isEmpty()) {
+					println().printIndent().print(classdecl.sym.getSimpleName().toString()).print("[\"" + INTERFACES_FIELD_NAME + "\"] = ");
+					print("[");
+					for (String itf : interfaces) {
+						print("\"").print(itf).print("\",");
+					}
+					removeLastChar();
+					print("];").println();
+				}
+				if (!getScope().enumWrapperClassScope) {
+					println();
 				}
 			}
+			if (getScope().enumWrapperClassScope) {
+				println().printIndent().print(classdecl.sym.getSimpleName().toString()).print("[\"" + ENUM_WRAPPER_CLASS_WRAPPERS + "\"] = [");
+				for (String k : getScope().javaEnumKeys) {
+					print(k).print(", ");
+				}
+				removeLastChars(2);
+				print("];").println();
+			}
+		}
 
+		// enum class for complex enum
+		if (getScope().isComplexEnum) {
+			println().println().printIndent();
+			visitClassDef(classdecl);
+		}
+
+		// inner and anonymous classes in a namespace ======================
+		// print valid inner classes
+		boolean nameSpace = false;
+		for (JCTree def : classdecl.defs) {
+			if (def instanceof JCClassDecl) {
+				JCClassDecl cdef = (JCClassDecl) def;
+				if (isIgnored(cdef)) {
+					continue;
+				}
+				if (!nameSpace) {
+					nameSpace = true;
+					println().println().printIndent();
+					if (!globalModule) {
+						print("export ");
+					} else {
+						if (isDefinitionScope) {
+							print("declare ");
+						}
+					}
+					print("namespace ").print(name).print(" {").startIndent();
+				}
+				println().println().printIndent().print(cdef);
+			}
+		}
+		// print anonymous classes
+		for (JCClassDecl cdef : getScope().anonymousClasses) {
+			if (!nameSpace) {
+				nameSpace = true;
+				println().println().printIndent();
+				if (!globalModule) {
+					print("export ");
+				}
+				print("namespace ").print(name).print(" {").startIndent();
+			}
+			isAnonymousClass = true;
+			println().println().printIndent().print(cdef);
+			isAnonymousClass = false;
+		}
+		if (nameSpace) {
+			println().endIndent().printIndent().print("}").println();
+		}
+		// end of namespace =================================================
+
+		if (!getScope().sharedMode && getScope().interfaceScope) {
+			// print static members of interfaces
+			nameSpace = false;
+			for (JCTree def : classdecl.defs) {
+				if ((def instanceof JCMethodDecl && ((JCMethodDecl) def).sym.isStatic())
+						|| (def instanceof JCVariableDecl && ((JCVariableDecl) def).sym.isStatic())) {
+					if (!nameSpace) {
+						nameSpace = true;
+						println().println().printIndent().print(getIndent() == 0 && isDefinitionScope ? "declare " : "export ").print("namespace ")
+								.print(classdecl.getSimpleName().toString()).print(" {").startIndent();
+					}
+					println().println().printIndent().print(def);
+					if (def instanceof JCVariableDecl) {
+						print(";");
+					}
+				}
+			}
+			if (nameSpace) {
+				println().endIndent().printIndent().print("}").println();
+			}
+		}
+
+		if (mainMethod != null && mainMethod.getParameters().size() < 2 && mainMethod.sym.getEnclosingElement().equals(classdecl.sym)) {
+			String mainClassName = getQualifiedTypeName(classdecl.sym, globals);
 			String mainMethodQualifier = mainClassName;
 			if (!isBlank(mainClassName)) {
 				mainMethodQualifier = mainClassName + ".";
 			}
 			context.entryFiles.add(new File(compilationUnit.sourcefile.getName()));
-			compilationUnitMainCalls
-					.add(mainMethodQualifier + JSweetConfig.MAIN_FUNCTION_NAME + "(" + (mainMethod.getParameters().isEmpty() ? "" : "null") + ");");
+			context.addFooterStatement(
+					mainMethodQualifier + JSweetConfig.MAIN_FUNCTION_NAME + "(" + (mainMethod.getParameters().isEmpty() ? "" : "null") + ");");
 		}
 
-		interfaceScope = false;
+		getAdapter().typeVariablesToErase.removeAll(parentTypeVars);
+		exitScope();
+	}
+
+	private void printDefaultImplementation(MethodSymbol method) {
+		printIndent().print("public abstract ").print(method.getSimpleName().toString());
+		print("(");
+		if (method.getParameters() != null && !method.getParameters().isEmpty()) {
+			for (VarSymbol var : method.getParameters()) {
+				print(var.name.toString()).print(": any");
+				print(", ");
+			}
+			removeLastChars(2);
+		}
+		print(")");
+		print(": any;").println();
+	}
+
+	private String getQualifiedTypeName(TypeSymbol type, boolean globals) {
+		return getAdapter().getQualifiedTypeName(type, globals);
 	}
 
 	private String getTSMethodName(JCMethodDecl methodDecl) {
-		String name = methodDecl.name.toString();
+		String name = Util.getActualName(methodDecl.sym);
 		switch (name) {
 		case "<init>":
 			return "constructor";
@@ -593,82 +1153,138 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		}
 	}
 
-	private String getTypeInitalValue(String typeName) {
-		if (typeName == null) {
-			return "null";
-		}
-		switch (typeName) {
-		case "void":
-			return null;
-		case "boolean":
-			return "false";
-		case "number":
-			return "0";
-		default:
-			return "null";
-		}
-	}
-
 	@Override
 	public void visitMethodDef(JCMethodDecl methodDecl) {
+		if (Util.hasAnnotationType(methodDecl.sym, JSweetConfig.ANNOTATION_ERASED)) {
+			// erased elements are ignored
+			return;
+		}
 		JCClassDecl parent = (JCClassDecl) getParent();
 
-		boolean constructor = methodDecl.name.toString().equals("<init>");
-		if (enumScope) {
+		if (parent != null && methodDecl.pos == parent.pos) {
+			return;
+		}
+
+		if (JSweetConfig.INDEXED_GET_FUCTION_NAME.equals(methodDecl.getName().toString()) && methodDecl.getParameters().size() == 1) {
+			print("[").print(methodDecl.getParameters().head).print("]: ");
+			getAdapter().substituteAndPrintType(methodDecl.restype).print(";");
+			return;
+		}
+
+		boolean constructor = methodDecl.sym.isConstructor();
+		if (getScope().enumScope) {
 			if (constructor) {
-				if (parent.pos != methodDecl.pos) {
-					report(methodDecl, methodDecl.name, JSweetProblem.INVALID_CONSTRUCTOR_IN_ENUM);
+				if (parent != null && parent.pos != methodDecl.pos) {
+					getScope().isComplexEnum = true;
 				}
 			} else {
-				report(methodDecl, methodDecl.name, JSweetProblem.INVALID_METHOD_IN_ENUM);
+				getScope().isComplexEnum = true;
 			}
 			return;
 		}
 
-		Overload overload = context.getOverload(parent.sym, methodDecl.name.toString());
-		boolean inOverload = overload != null && overload.methods.size() > 1;
-		if (inOverload) {
-			if (!overload.isValid) {
-				report(methodDecl, methodDecl.name, JSweetProblem.INVALID_OVERLOAD, methodDecl.name);
-				return;
-			} else {
-				if (!overload.coreMethod.equals(methodDecl.sym)) {
-					return;
+		Overload overload = null;
+		boolean inOverload = false;
+		boolean inCoreWrongOverload = false;
+		if (parent != null) {
+			overload = context.getOverload(parent.sym, methodDecl.sym);
+			inOverload = overload != null && overload.methods.size() > 1;
+			if (inOverload) {
+				if (!overload.isValid) {
+					if (overload.coreMethod.equals(methodDecl)) {
+						inCoreWrongOverload = true;
+					} else {
+						if (methodDecl.sym.isConstructor()) {
+							return;
+						}
+						if (!overload.printed && overload.coreMethod.sym.getEnclosingElement() != parent.sym
+								&& !Util.isParent(parent.sym, (ClassSymbol) overload.coreMethod.sym.getEnclosingElement())) {
+							visitMethodDef(overload.coreMethod);
+							overload.printed = true;
+							if (!Util.isInterface(parent.sym)) {
+								println().println().printIndent();
+							}
+						}
+						if (Util.isInterface(parent.sym)) {
+							return;
+						}
+					}
+				} else {
+					if (!overload.coreMethod.equals(methodDecl)) {
+						return;
+					}
 				}
 			}
 		}
 
 		boolean ambient = Util.hasAnnotationType(methodDecl.sym, JSweetConfig.ANNOTATION_AMBIENT);
+		int jsniLine = -1;
+		String[] content = null;
 
 		if (methodDecl.mods.getFlags().contains(Modifier.NATIVE)) {
-			if (!declareClassScope && !ambient) {
-				report(methodDecl, methodDecl.name, JSweetProblem.NATIVE_MODIFIER_IS_NOT_ALLOWED, methodDecl.name);
+			if (!getScope().declareClassScope && !ambient && !getScope().interfaceScope) {
+				content = getGetSource(getCompilationUnit());
+				if (content != null) {
+					int line = 0;
+					if (methodDecl.getParameters() != null && !methodDecl.getParameters().isEmpty()) {
+						line = diagnosticSource.getLineNumber(methodDecl.getParameters().last().getStartPosition()) - 1;
+					} else {
+						line = diagnosticSource.getLineNumber(methodDecl.getStartPosition()) - 1;
+					}
+					if (content[line].contains("/*-{")) {
+						jsniLine = line;
+					} else {
+						if (content[line + 1].contains("/*-{")) {
+							jsniLine = line + 1;
+						}
+					}
+				}
+				if (jsniLine == -1) {
+					report(methodDecl, methodDecl.name, JSweetProblem.NATIVE_MODIFIER_IS_NOT_ALLOWED, methodDecl.name);
+				}
 			}
 		} else {
-			if (declareClassScope && !constructor) {
-				report(methodDecl, methodDecl.name, JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, methodDecl.name, parent.name);
+			if (getScope().declareClassScope && !constructor && !getScope().interfaceScope && !methodDecl.mods.getFlags().contains(Modifier.DEFAULT)) {
+				report(methodDecl, methodDecl.name, JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, methodDecl.name,
+						parent == null ? "<no class>" : parent.name);
 			}
 		}
 
 		if (methodDecl.name.toString().equals("constructor")) {
 			report(methodDecl, methodDecl.name, JSweetProblem.CONSTRUCTOR_MEMBER);
 		}
-		VarSymbol v = Util.findFieldDeclaration(parent.sym, methodDecl.name);
-		if (v != null) {
-			report(methodDecl, methodDecl.name, JSweetProblem.METHOD_CONFLICTS_FIELD, methodDecl.name, v.owner);
+		if (parent != null) {
+			VarSymbol v = Util.findFieldDeclaration(parent.sym, methodDecl.name);
+			if (v != null && context.getFieldNameMapping(v) == null) {
+				report(methodDecl, methodDecl.name, JSweetProblem.METHOD_CONFLICTS_FIELD, methodDecl.name, v.owner);
+			}
 		}
 		if (JSweetConfig.MAIN_FUNCTION_NAME.equals(methodDecl.name.toString()) && methodDecl.mods.getFlags().contains(Modifier.STATIC)
 				&& !Util.hasAnnotationType(methodDecl.sym, JSweetConfig.ANNOTATION_DISABLED)) {
-			mainMethod = methodDecl;
+			// ignore main methods in inner classes
+			if (scope.size() == 1) {
+				mainMethod = methodDecl;
+			}
 		}
-		if (methodDecl.pos == parent.pos) {
+		if (parent != null && methodDecl.pos == parent.pos) {
 			return;
 		}
 
-		boolean globals = JSweetConfig.GLOBALS_CLASS_NAME.equals(parent.name.toString());
-		if (globals) {
+		boolean globals = parent == null ? false : JSweetConfig.GLOBALS_CLASS_NAME.equals(parent.name.toString());
+		if (!getScope().sharedMode) {
+			globals = globals || (getScope().interfaceScope && methodDecl.mods.getFlags().contains(Modifier.STATIC));
+		}
+		printDocComment(methodDecl, false);
+		if (parent == null) {
+			print("function ");
+		} else if (globals) {
 			if (constructor) {
 				report(methodDecl, methodDecl.name, JSweetProblem.GLOBAL_CONSTRUCTOR_DEF);
+				return;
+			}
+
+			if (!methodDecl.mods.getFlags().contains(Modifier.STATIC)) {
+				report(methodDecl, methodDecl.name, JSweetProblem.GLOBALS_CAN_ONLY_HAVE_STATIC_MEMBERS);
 				return;
 			}
 
@@ -681,81 +1297,431 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 					print("export ");
 				}
 			}
-			if (ambient) {
+			if (ambient || (getIndent() == 0 && isDefinitionScope)) {
 				print("declare ");
 			}
 			print("function ");
 		} else {
-			if (methodDecl.mods.getFlags().contains(Modifier.PUBLIC)) {
-				if (!interfaceScope) {
+			if (methodDecl.mods.getFlags().contains(Modifier.PUBLIC) || (inOverload && overload.coreMethod.equals(methodDecl))) {
+				if (!getScope().interfaceScope) {
 					print("public ");
 				}
 			}
 			if (methodDecl.mods.getFlags().contains(Modifier.PRIVATE)) {
-				if (!interfaceScope) {
-					print("private ");
-				} else {
-					report(methodDecl, methodDecl.name, JSweetProblem.INVALID_PRIVATE_IN_INTERFACE, methodDecl.name, parent.name);
+				if (!constructor) {
+					if (!getScope().innerClass) {
+						if (!getScope().interfaceScope) {
+							if (!(inOverload && overload.coreMethod.equals(methodDecl) || getScope().hasInnerClass)) {
+								print("private ");
+							}
+						} else {
+							if (!(inOverload && overload.coreMethod.equals(methodDecl))) {
+								if (getScope().sharedMode) {
+									print("public ");
+								} else {
+									report(methodDecl, methodDecl.name, JSweetProblem.INVALID_PRIVATE_IN_INTERFACE, methodDecl.name,
+											parent == null ? "<no class>" : parent.name);
+								}
+							}
+						}
+					}
 				}
 			}
 			if (methodDecl.mods.getFlags().contains(Modifier.STATIC)) {
-				if (!interfaceScope) {
+				if (!getScope().interfaceScope) {
 					print("static ");
 				} else {
-					report(methodDecl, methodDecl.name, JSweetProblem.INVALID_STATIC_IN_INTERFACE, methodDecl.name, parent.name);
+					if (getScope().sharedMode) {
+						return;
+					}
+				}
+			}
+			if (methodDecl.mods.getFlags().contains(Modifier.ABSTRACT)) {
+				if (!getScope().interfaceScope && !inOverload) {
+					print("abstract ");
 				}
 			}
 			if (ambient) {
 				report(methodDecl, methodDecl.name, JSweetProblem.WRONG_USE_OF_AMBIENT, methodDecl.name);
 			}
 		}
-		printIdentifier(getTSMethodName(methodDecl));
-		if (methodDecl.typarams != null && !methodDecl.typarams.isEmpty()) {
-			print("<").printArgList(methodDecl.typarams).print(">");
+		if (parent == null || !Util.hasAnnotationType(parent.sym, FunctionalInterface.class.getName())) {
+			if (inOverload && !overload.isValid && !inCoreWrongOverload) {
+				print(getOverloadMethodName(methodDecl));
+			} else {
+				print(getTSMethodName(methodDecl));
+			}
+		}
+		if ((methodDecl.typarams != null && !methodDecl.typarams.isEmpty()) || (getContext().getWildcards(methodDecl.sym) != null)) {
+			getAdapter().inTypeParameters = true;
+			print("<");
+			if (methodDecl.typarams != null && !methodDecl.typarams.isEmpty()) {
+				printArgList(methodDecl.typarams);
+				if (getContext().getWildcards(methodDecl.sym) != null) {
+					print(", ");
+				}
+			}
+			if (getContext().getWildcards(methodDecl.sym) != null) {
+				printArgList(getContext().getWildcards(methodDecl.sym), getAdapter()::substituteAndPrintType);
+			}
+			print(">");
+			getAdapter().inTypeParameters = false;
 		}
 		print("(");
+		if (inCoreWrongOverload) {
+			getScope().eraseVariableTypes = true;
+		}
+		boolean paramPrinted = false;
+		if (getScope().innerClassNotStatic && methodDecl.sym.isConstructor()) {
+			print(PARENT_CLASS_FIELD_NAME + ": any, ");
+			paramPrinted = true;
+		}
+		if (constructor && getScope().enumWrapperClassScope) {
+			print("private " + ENUM_WRAPPER_CLASS_ORDINAL + " : number, ");
+			print("private " + ENUM_WRAPPER_CLASS_NAME + " : string");
+			if (!methodDecl.getParameters().isEmpty()) {
+				print(", ");
+			}
+		}
 		int i = 0;
-		for (JCVariableDecl param : methodDecl.params) {
+		for (JCVariableDecl param : methodDecl.getParameters()) {
 			print(param);
-			if (inOverload && overload.defaultValues[i] != null) {
-				print(" = ").print(overload.defaultValues[i]);
+			if (inOverload && overload.isValid && overload.defaultValues.get(i) != null) {
+				print(" = ").print(overload.defaultValues.get(i));
 			}
 			print(", ");
 			i++;
+			paramPrinted = true;
 		}
-		if (!methodDecl.params.isEmpty()) {
+		if (inCoreWrongOverload) {
+			getScope().eraseVariableTypes = false;
+		}
+		if (paramPrinted) {
 			removeLastChars(2);
 		}
-		print(") ");
-		if (methodDecl.restype != null && methodDecl.restype.type.getTag() != TypeTag.VOID) {
-			print(": ");
-			getAdapter().substituteAndPrintType(methodDecl.restype);
+		print(")");
+		if (inCoreWrongOverload && !methodDecl.sym.isConstructor()) {
+			print(" : any");
+		} else {
+			if (methodDecl.restype != null && methodDecl.restype.type.getTag() != TypeTag.VOID) {
+				print(" : ");
+				getAdapter().substituteAndPrintType(methodDecl.restype);
+			}
 		}
-		if (methodDecl.getBody() == null) {
-			if (!interfaceScope && methodDecl.mods.getFlags().contains(Modifier.ABSTRACT)) {
+		if (inCoreWrongOverload && Util.isInterface(parent.sym)) {
+			print(";");
+			return;
+		}
+		if (methodDecl.getBody() == null && !(inCoreWrongOverload && !getScope().declareClassScope)
+				|| (methodDecl.mods.getFlags().contains(Modifier.DEFAULT) && !getScope().defaultMethodScope)) {
+			if (!getScope().interfaceScope && methodDecl.getModifiers().getFlags().contains(Modifier.ABSTRACT) && inOverload && !overload.isValid) {
 				print(" {");
-				String typeName = methodDecl.restype.toString();
-				if (!"void".equals(typeName)) {
-					print(" return ").print(getTypeInitalValue(typeName)).print("; ");
-				}
+				// runtime error if we go there...
+				print(" throw new Error('cannot invoke abstract overloaded method... check your argument(s) type(s)'); ");
 				print("}");
+			} else if (jsniLine != -1) {
+				int line = jsniLine;
+				print(" {").println().startIndent();
+				String jsniCode = content[line].substring(content[line].indexOf("/*-{") + 4).trim();
+				StringBuilder jsni = new StringBuilder();
+				if (!StringUtils.isEmpty(jsniCode)) {
+					jsni.append(jsniCode);
+					jsni.append("\n");
+				}
+				line++;
+				while (!content[line].contains("}-*/")) {
+					jsniCode = content[line++].trim();
+					jsni.append(jsniCode);
+					jsni.append("\n");
+				}
+				jsniCode = content[line].substring(0, content[line].indexOf("}-*/")).trim();
+				if (!StringUtils.isEmpty(jsniCode)) {
+					jsni.append(jsniCode);
+					jsni.append("\n");
+				}
+				if (!StringUtils.isEmpty(jsni)) {
+					jsni.deleteCharAt(jsni.length() - 1);
+				}
+				String mergedCode = parseJSNI(jsni.toString());
+				for (String s : mergedCode.split("\\n")) {
+					printIndent().print(s).println();
+				}
+				endIndent().printIndent().print("}");
 			} else {
 				print(";");
 			}
 		} else {
-			boolean hasStatements = methodDecl.getBody().getStatements().isEmpty();
-			if (interfaceScope) {
-				report(methodDecl, methodDecl.name, JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, methodDecl.name, parent.name);
+			if (getScope().interfaceScope) {
+				if (getScope().sharedMode) {
+					print(";");
+					return;
+				} else {
+					if (!methodDecl.mods.getFlags().contains(Modifier.STATIC)) {
+						report(methodDecl, methodDecl.name, JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, methodDecl.name,
+								parent == null ? "<no class>" : parent.name);
+					}
+				}
 			}
-			if (declareClassScope) {
-				if (!constructor || hasStatements) {
-					report(methodDecl, methodDecl.name, JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, methodDecl.name, parent.name);
+			if (getScope().declareClassScope) {
+				if (!constructor || (methodDecl.getBody() != null && methodDecl.getBody().getStatements().isEmpty())) {
+					report(methodDecl, methodDecl.name, JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, methodDecl.name,
+							parent == null ? "<no class>" : parent.name);
 				}
 				print(";");
 			} else {
-				print(" ").print(methodDecl.getBody());
+				if (inCoreWrongOverload) {
+					print(" {").println().startIndent().printIndent();
+
+					boolean wasPrinted = false;
+					for (i = 0; i < overload.methods.size(); i++) {
+						JCMethodDecl method = overload.methods.get(i);
+						if (Util.isInterface((ClassSymbol) method.sym.getEnclosingElement()) && !method.getModifiers().getFlags().contains(Modifier.DEFAULT)) {
+							continue;
+						}
+						if (!Util.isParent(parent.sym, (ClassSymbol) method.sym.getEnclosingElement())) {
+							continue;
+						}
+						if (parent.sym != method.sym.getEnclosingElement()
+								&& context.getOverload((ClassSymbol) method.sym.getEnclosingElement(), method.sym).coreMethod == method) {
+							continue;
+						}
+						if (wasPrinted) {
+							print(" else ");
+						}
+						wasPrinted = true;
+						print("if(");
+						printMethodParamsTest(overload, method);
+						print(") ");
+						if (i == 0 || method.sym.isConstructor()) {
+							printInlinedMethod(overload, method, methodDecl.getParameters());
+						} else {
+							print("{").println().startIndent().printIndent();
+							// temporary cast to any because of Java generics
+							// bug
+							print("return <any>");
+							if (method.sym.isStatic()) {
+								print(getQualifiedTypeName(parent.sym, false).toString());
+							} else {
+								print("this");
+							}
+							print(".").print(getOverloadMethodName(method)).print("(");
+							for (int j = 0; j < method.getParameters().size(); j++) {
+								print(avoidJSKeyword(overload.coreMethod.getParameters().get(j).name.toString())).print(", ");
+							}
+							if (!method.getParameters().isEmpty()) {
+								removeLastChars(2);
+							}
+							print(");");
+							println().endIndent().printIndent().print("}");
+						}
+					}
+					print(" else throw new Error('invalid overload');");
+					endIndent().println().printIndent().print("}");
+				} else {
+					print(" ").print("{").println().startIndent();
+					stack.push(methodDecl.getBody());
+					if (!methodDecl.getBody().stats.isEmpty() && methodDecl.getBody().stats.head.toString().startsWith("super(")) {
+						printBlockStatement(methodDecl.getBody().stats.head);
+						if (parent != null) {
+							printInstanceInitialization(parent, methodDecl.sym);
+						}
+						printBlockStatements(methodDecl.getBody().stats.tail);
+					} else {
+						if (parent != null) {
+							printInstanceInitialization(parent, methodDecl.sym);
+						}
+						printBlockStatements(methodDecl.getBody().stats);
+					}
+					stack.pop();
+					endIndent().printIndent().print("}");
+
+				}
 			}
 		}
+	}
+
+	private void printInstanceInitialization(JCClassDecl clazz, MethodSymbol method) {
+		if (getContext().options.isInterfaceTracking() && method == null || method.isConstructor()) {
+			getScope().hasDeclaredConstructor = true;
+			if (getScope().innerClassNotStatic) {
+				printIndent().print("this." + PARENT_CLASS_FIELD_NAME + " = " + PARENT_CLASS_FIELD_NAME + ";").println();
+			}
+			for (JCTree member : clazz.defs) {
+				if (member instanceof JCVariableDecl) {
+					JCVariableDecl var = (JCVariableDecl) member;
+					if (getScope().innerClassNotStatic && !Util.isConstantOrNullField(var)) {
+						String name = var.getName().toString();
+						if (context.getFieldNameMapping(var.sym) != null) {
+							name = context.getFieldNameMapping(var.sym);
+						}
+						printIndent().print("this.").print(name).print(" = ").print(var.init).print(";").println();
+					} else if (var.init == null && Util.isCoreType(var.type)) {
+						String name = var.getName().toString();
+						if (context.getFieldNameMapping(var.sym) != null) {
+							name = context.getFieldNameMapping(var.sym);
+						}
+						printIndent().print("this.").print(name).print(" = ").print(Util.getTypeInitialValue(var.type)).print(";").println();
+					}
+				} else if (member instanceof JCBlock) {
+					JCBlock block = (JCBlock) member;
+					if (!block.isStatic()) {
+						printIndent().print("(() => {").startIndent().println();
+						printBlockStatements(block.stats);
+						endIndent().printIndent().print("})();").println();
+					}
+				}
+			}
+		}
+	}
+
+	private String parseJSNI(String jsniCode) {
+		return jsniCode.replaceAll("@[^:]*::[\\n]?([a-zA-Z_$][a-zA-Z\\d_$]*)[\\n]?\\([^)]*\\)", "$1").replaceAll("@[^:]*::\\n?([a-zA-Z_$][a-zA-Z\\d_$]*)",
+				"$1");
+	}
+
+	private void printInlinedMethod(Overload overload, JCMethodDecl method, List<? extends JCTree> args) {
+		print("{").println().startIndent();
+		printIndent().print(VAR_DECL_KEYWORD + " __args = Array.prototype.slice.call(arguments);").println();
+		for (int j = 0; j < method.getParameters().size(); j++) {
+			if (args.get(j) instanceof JCVariableDecl) {
+				if (method.getParameters().get(j).name.equals(((JCVariableDecl) args.get(j)).name)) {
+					continue;
+				} else {
+					printIndent().print(VAR_DECL_KEYWORD + " ").print(avoidJSKeyword(method.getParameters().get(j).name.toString())).print(" : ").print("any")
+							.print(Util.isVarargs(method.getParameters().get(j)) ? "[]" : "").print(" = ").print("__args[" + j + "]").print(";").println();
+				}
+			} else {
+				if (method.getParameters().get(j).name.toString().equals(args.get(j).toString())) {
+					continue;
+				} else {
+					getScope().inlinedConstructorArgs = method.getParameters().stream().map(p -> p.sym.name.toString()).collect(Collectors.toList());
+					printIndent().print(VAR_DECL_KEYWORD + " ").print(avoidJSKeyword(method.getParameters().get(j).name.toString())).print(" : ").print("any")
+							.print(Util.isVarargs(method.getParameters().get(j)) ? "[]" : "").print(" = ").print(args.get(j)).print(";").println();
+					getScope().inlinedConstructorArgs = null;
+				}
+			}
+		}
+		if (method.getBody() != null) {
+			boolean skipFirst = false;
+			boolean initialized = false;
+			if (!method.getBody().stats.isEmpty() && method.getBody().stats.get(0).toString().startsWith("this(")) {
+				skipFirst = true;
+				JCMethodInvocation inv = (JCMethodInvocation) ((JCExpressionStatement) method.getBody().stats.get(0)).expr;
+				MethodSymbol ms = Util.findMethodDeclarationInType(context.types, (TypeSymbol) overload.coreMethod.sym.getEnclosingElement(), inv);
+				for (JCMethodDecl md : overload.methods) {
+					if (md.sym.equals(ms)) {
+						printIndent();
+						initialized = true;
+						printInlinedMethod(overload, md, inv.args);
+						println();
+					}
+				}
+
+			}
+			stack.push(method.getBody());
+			com.sun.tools.javac.util.List<JCStatement> stats = skipFirst ? method.getBody().stats.tail : method.getBody().stats;
+			if (!stats.isEmpty() && stats.head.toString().startsWith("super(")) {
+				printBlockStatement(stats.head);
+				printFieldInitializations();
+				if (!initialized) {
+					printInstanceInitialization(getParent(JCClassDecl.class), method.sym);
+				}
+				if (!stats.tail.isEmpty()) {
+					printIndent().print("((").print(") => {").startIndent().println();
+					printBlockStatements(stats.tail);
+					endIndent().printIndent().print("})(").print(");").println();
+				}
+			} else {
+				if (!initialized) {
+					printInstanceInitialization(getParent(JCClassDecl.class), method.sym);
+				}
+				if (!stats.isEmpty() || !method.sym.isConstructor()) {
+					printIndent();
+				}
+				if (!method.sym.isConstructor()) {
+					print("return <any>");
+				}
+				if (!stats.isEmpty() || !method.sym.isConstructor()) {
+					print("((").print(") => {").startIndent().println();
+					printBlockStatements(stats);
+					endIndent().printIndent().print("})(").print(");").println();
+				}
+			}
+			stack.pop();
+		} else {
+			String returnValue = Util.getTypeInitialValue(method.sym.getReturnType());
+			if (returnValue != null) {
+				print(" return ").print(returnValue).print("; ");
+			}
+		}
+		endIndent().printIndent().print("}");
+	}
+
+	private void printFieldInitializations() {
+		for (JCVariableDecl field : getScope().fieldsWithInitializers) {
+			String name = getAdapter().getIdentifier(field.sym);
+			if (context.getFieldNameMapping(field.sym) != null) {
+				name = context.getFieldNameMapping(field.sym);
+			}
+			printIndent().print("this.").print(name).print(" = ").print(field.init).print(";").println();
+		}
+	}
+
+	private void printBlockStatements(List<JCStatement> statements) {
+		for (JCStatement statement : statements) {
+			printBlockStatement(statement);
+		}
+	}
+
+	private void printBlockStatement(JCStatement statement) {
+		printIndent();
+		int pos = getCurrentPosition();
+		print(statement);
+		if (getCurrentPosition() == pos) {
+			removeLastIndent();
+			return;
+		}
+		if (!statementsWithNoSemis.contains(statement.getClass())) {
+			if (statement instanceof JCLabeledStatement) {
+				if (!statementsWithNoSemis.contains(((JCLabeledStatement) statement).body.getClass())) {
+					print(";");
+				}
+			} else {
+				print(";");
+			}
+		}
+		println();
+	}
+
+	private String getOverloadMethodName(JCMethodDecl method) {
+		if (method.sym.isConstructor()) {
+			return "constructor";
+		}
+		StringBuilder sb = new StringBuilder(method.getName().toString());
+		sb.append("$");
+		for (JCVariableDecl p : method.getParameters()) {
+			sb.append(context.types.erasure(p.type).toString().replace('.', '_').replace("[]", "_A"));
+			sb.append("$");
+		}
+		if (!method.getParameters().isEmpty()) {
+			sb.deleteCharAt(sb.length() - 1);
+		}
+		return sb.toString();
+	}
+
+	private void printMethodParamsTest(Overload overload, JCMethodDecl m) {
+		int i = 0;
+		for (; i < m.getParameters().size(); i++) {
+			print("(");
+			printInstanceOf(avoidJSKeyword(overload.coreMethod.getParameters().get(i).name.toString()), null, m.getParameters().get(i).type);
+			print(" || ").print(avoidJSKeyword(overload.coreMethod.getParameters().get(i).name.toString()) + " === null").print(")");
+			print(" && ");
+		}
+		for (; i < overload.coreMethod.getParameters().size(); i++) {
+			print(avoidJSKeyword(overload.coreMethod.getParameters().get(i).name.toString())).print(" === undefined");
+			print(" && ");
+		}
+		removeLastChars(4);
 	}
 
 	@Override
@@ -764,25 +1730,26 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		boolean globals = (parent instanceof JCClassDecl) && JSweetConfig.GLOBALS_CLASS_NAME.equals(((JCClassDecl) parent).name.toString());
 		boolean initializer = (parent instanceof JCClassDecl) && !globals;
 		int static_i = 0;
-		int i = 0;
 		if (initializer) {
-			if (interfaceScope) {
-				report(block, JSweetProblem.INVALID_INITIALIZER_IN_INTERFACE, ((JCClassDecl) parent).name);
+			if (getScope().interfaceScope) {
+				if (getScope().sharedMode) {
+					return;
+				} else {
+					report(block, JSweetProblem.INVALID_INITIALIZER_IN_INTERFACE, ((JCClassDecl) parent).name);
+				}
+			}
+			if (!block.isStatic()) {
+				// non-static blocks are initialized in the constructor
+				return;
 			}
 			for (JCTree m : ((JCClassDecl) parent).getMembers()) {
 				if (m instanceof JCBlock) {
 					if (((JCBlock) m).isStatic()) {
+						if (block == m) {
+							print("static __static_initializer_" + static_i + "() ");
+							break;
+						}
 						static_i++;
-						if (block == m) {
-							print("static __static_initializer_" + static_i + "() : any ");
-							break;
-						}
-					} else {
-						i++;
-						if (block == m) {
-							print("__initializer_" + i + "() : any ");
-							break;
-						}
 					}
 				}
 			}
@@ -791,79 +1758,122 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 			print("{").println().startIndent();
 		}
 
-		for (JCStatement statement : block.stats) {
-			printIndent();
-			int pos = getCurrentPosition();
-			print(statement);
-			if (getCurrentPosition() == pos) {
-				removeLastIndent();
-				continue;
-			}
-			if (!statementsWithNoSemis.contains(statement.getClass())) {
-				print(";");
-			}
-			println();
-		}
+		printBlockStatements(block.stats);
+
 		if (!globals) {
 			endIndent().printIndent().print("}");
 		}
-		if (initializer) {
-			if (block.isStatic()) {
-				println().printIndent().print("static __static_initializer_" + static_i + "_var : any = " + getParent(JCClassDecl.class).getSimpleName()
-						+ ".__static_initializer_" + static_i + "();");
-			} else {
-				println().printIndent().print("__initializer_" + i + "_var : any = this.__initializer_" + i + "();");
-			}
+	}
+
+	private String avoidJSKeyword(String name) {
+		if (JSweetConfig.JS_KEYWORDS.contains(name)) {
+			name = JSweetConfig.JS_KEYWORD_PREFIX + name;
 		}
+		return name;
 	}
 
 	@Override
 	public void visitVarDef(JCVariableDecl varDecl) {
-		if (getParent().getKind() == Kind.ENUM) {
+		if (Util.hasAnnotationType(varDecl.sym, JSweetConfig.ANNOTATION_ERASED)) {
+			// erased elements are ignored
+			return;
+		}
+		if (Util.hasAnnotationType(varDecl.sym, JSweetConfig.ANNOTATION_STRING_TYPE)) {
+			// string type fields are ignored
+			return;
+		}
+
+		if (getScope().enumScope) {
 			print(varDecl.name.toString());
 		} else {
 			JCTree parent = getParent();
-			String name = varDecl.name.toString();
+
+			if (getScope().enumWrapperClassScope && varDecl.sym.isEnum()) {
+				// enum fields are not part of the enum auxiliary class but will
+				// initialize the enum values
+				JCNewClass newClass = (JCNewClass) varDecl.init;
+				JCClassDecl clazz = (JCClassDecl) parent;
+				int pos = getCurrentPosition();
+				print("new ").print(clazz.getSimpleName().toString() + ENUM_WRAPPER_CLASS_SUFFIX).print("(");
+				print("" + getScope().javaEnumKeys.size() + ", ");
+				print("\"" + varDecl.sym.name.toString() + "\"");
+				if (!newClass.args.isEmpty()) {
+					print(", ");
+				}
+				printArgList(newClass.args).print(")");
+				String expr = getOutput().substring(pos);
+				removeLastChars(getCurrentPosition() - pos);
+				getScope().javaEnumKeys.add(expr);
+				return;
+			}
+
+			String name = getAdapter().getIdentifier(varDecl.sym);
+			if (context.getFieldNameMapping(varDecl.sym) != null) {
+				name = context.getFieldNameMapping(varDecl.sym);
+			}
 
 			if (parent instanceof JCClassDecl) {
 				MethodSymbol m = Util.findMethodDeclarationInType(context.types, ((JCClassDecl) parent).sym, name, null);
 				if (m != null) {
 					report(varDecl, varDecl.name, JSweetProblem.FIELD_CONFLICTS_METHOD, name, m.owner);
 				}
-				if (!interfaceScope && name.equals("constructor")) {
+				if (!getScope().interfaceScope && name.equals("constructor")) {
 					report(varDecl, varDecl.name, JSweetProblem.CONSTRUCTOR_MEMBER);
 				}
 			} else {
-				if (JSweetConfig.JS_KEYWORDS.contains(varDecl.name.toString())) {
+				if (context.bundleMode) {
+					if (context.importedTopPackages.contains(name)) {
+						name = "__var_" + name;
+					}
+				}
+				if (JSweetConfig.JS_KEYWORDS.contains(name)) {
 					report(varDecl, varDecl.name, JSweetProblem.JS_KEYWORD_CONFLICT, name, name);
-					name = "_jsweet_" + name;
+					name = JSweetConfig.JS_KEYWORD_PREFIX + name;
 				}
 			}
 
 			boolean globals = (parent instanceof JCClassDecl) && JSweetConfig.GLOBALS_CLASS_NAME.equals(((JCClassDecl) parent).name.toString());
 
+			if (globals && !varDecl.mods.getFlags().contains(Modifier.STATIC)) {
+				report(varDecl, varDecl.name, JSweetProblem.GLOBALS_CAN_ONLY_HAVE_STATIC_MEMBERS);
+				return;
+			}
+
+			if (!getScope().sharedMode) {
+				globals = globals
+						|| (parent instanceof JCClassDecl && (((JCClassDecl) parent).sym.isInterface() || getScope().interfaceScope && varDecl.sym.isStatic()));
+			}
+
+			printDocComment(varDecl, false);
 			if (!globals && parent instanceof JCClassDecl) {
 				if (varDecl.mods.getFlags().contains(Modifier.PUBLIC)) {
-					if (!interfaceScope) {
+					if (!getScope().interfaceScope) {
 						print("public ");
 					}
 				}
 				if (varDecl.mods.getFlags().contains(Modifier.PRIVATE)) {
-					if (!interfaceScope) {
-						print("private ");
+					if (!getScope().interfaceScope) {
+						if (!getScope().innerClass && !varDecl.mods.getFlags().contains(Modifier.STATIC)) {
+							print("private ");
+						}
 					} else {
-						report(varDecl, varDecl.name, JSweetProblem.INVALID_PRIVATE_IN_INTERFACE, varDecl.name, ((JCClassDecl) parent).name);
+						if (!getScope().sharedMode) {
+							report(varDecl, varDecl.name, JSweetProblem.INVALID_PRIVATE_IN_INTERFACE, varDecl.name, ((JCClassDecl) parent).name);
+						}
 					}
 				}
+
 				if (varDecl.mods.getFlags().contains(Modifier.STATIC)) {
-					if (!interfaceScope) {
+					if (!getScope().interfaceScope) {
 						print("static ");
 					} else {
-						report(varDecl, varDecl.name, JSweetProblem.INVALID_STATIC_IN_INTERFACE, varDecl.name, ((JCClassDecl) parent).name);
+						if (getScope().sharedMode) {
+							return;
+						}
 					}
 				}
 			}
-			if (!interfaceScope && parent instanceof JCClassDecl) {
+			if (!getScope().interfaceScope && parent instanceof JCClassDecl) {
 				if (Util.hasAnnotationType(varDecl.sym, JSweetConfig.ANNOTATION_OPTIONAL)) {
 					report(varDecl, varDecl.name, JSweetProblem.USELESS_OPTIONAL_ANNOTATION, varDecl.name, ((JCClassDecl) parent).name);
 				}
@@ -880,47 +1890,108 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 							print("export ");
 						}
 					}
-					if (ambient) {
+					if (ambient || (getIndent() == 0 && isDefinitionScope)) {
 						print("declare ");
 					}
 				}
-				print("var ");
+				if (!(inArgListTail && (parent instanceof JCForLoop))) {
+					print(VAR_DECL_KEYWORD + " ");
+				}
 			} else {
 				if (ambient) {
 					report(varDecl, varDecl.name, JSweetProblem.WRONG_USE_OF_AMBIENT, varDecl.name);
 				}
 			}
 
-			if (isVarargs(varDecl)) {
+			if (Util.isVarargs(varDecl)) {
 				print("...");
 			}
 
-			printIdentifier(name);
-			if (interfaceScope && Util.hasAnnotationType(varDecl.sym, JSweetConfig.ANNOTATION_OPTIONAL)) {
+			print(name);
+			if (!Util.isVarargs(varDecl) && (getScope().eraseVariableTypes
+					|| (getScope().interfaceScope && Util.hasAnnotationType(varDecl.sym, JSweetConfig.ANNOTATION_OPTIONAL)))) {
 				print("?");
 			}
-			if (!skipTypeAnnotations) {
+			if (!getScope().skipTypeAnnotations && !getScope().enumWrapperClassScope) {
 				if (typeChecker.checkType(varDecl, varDecl.name, varDecl.vartype)) {
-					print(": ");
-					getAdapter().substituteAndPrintType(varDecl.vartype);
+					print(" : ");
+					if (getScope().eraseVariableTypes) {
+						print("any");
+						if (Util.isVarargs(varDecl)) {
+							print("[]");
+						}
+					} else {
+						AnnotationMirror annotation;
+						if ((annotation = Util.getAnnotation(varDecl.vartype.type.tsym, ANNOTATION_STRING_TYPE)) != null) {
+							print("\"");
+							print(getFirstAnnotationValue(annotation, varDecl.vartype.type.tsym.name).toString());
+							print("\"");
+						} else {
+							getAdapter().substituteAndPrintType(varDecl.vartype);
+						}
+					}
 				}
 			}
-			if (varDecl.init != null) {
-				if (!globals && parent instanceof JCClassDecl && interfaceScope) {
-					report(varDecl, varDecl.name, JSweetProblem.INVALID_FIELD_INITIALIZER_IN_INTERFACE, varDecl.name, ((JCClassDecl) parent).name);
+			if (context.lazyInitializedStatics.contains(varDecl.sym) && !getScope().enumWrapperClassScope) {
+				JCClassDecl clazz = (JCClassDecl) parent;
+				String prefix = clazz.getSimpleName().toString();
+				if (GLOBALS_CLASS_NAME.equals(prefix)) {
+					prefix = "";
 				} else {
-					print(" = ").print(varDecl.init);
+					prefix += ".";
+				}
+				print("; ");
+				if (globals) {
+					if (!globalModule) {
+						print("export ");
+					}
+					print("function ");
+				} else {
+					print("public static ");
+				}
+				print(name).print(STATIC_INITIALIZATION_SUFFIX + "() : ");
+				getAdapter().substituteAndPrintType(varDecl.vartype);
+				print(" { ");
+				int liCount = context.getStaticInitializerCount(clazz.sym);
+				if (liCount > 0) {
+					if (!globals) {
+						print(prefix + "__static_initialize(); ");
+					}
+				}
+				if (varDecl.init != null) {
+					print("if(" + prefix).print(name).print(" == null) ").print(prefix).print(name).print(" = ");
+					if (getScope().enumWrapperClassScope) {
+						JCNewClass newClass = (JCNewClass) varDecl.init;
+						print("new ").print(clazz.getSimpleName().toString()).print("(").printArgList(newClass.args).print(")");
+					} else {
+						print(varDecl.init);
+					}
+					print("; ");
+				}
+				print("return ").print(prefix).print(name).print("; }");
+				if (!globals) {
+					String qualifiedClassName = getQualifiedTypeName(clazz.sym, globals);
+					context.addTopFooterStatement((isBlank(qualifiedClassName) ? "" : qualifiedClassName + ".") + name + STATIC_INITIALIZATION_SUFFIX + "();");
+				}
+			} else {
+				if (varDecl.init != null) {
+					if (!(parent instanceof JCClassDecl && getScope().innerClassNotStatic && !Util.isConstantOrNullField(varDecl))) {
+						if (!globals && parent instanceof JCClassDecl && getScope().interfaceScope) {
+							if (!getScope().sharedMode) {
+								report(varDecl, varDecl.name, JSweetProblem.INVALID_FIELD_INITIALIZER_IN_INTERFACE, varDecl.name, ((JCClassDecl) parent).name);
+							}
+						} else {
+							if (!(getScope().hasConstructorOverloadWithSuperClass && getScope().fieldsWithInitializers.contains(varDecl))) {
+								print(" = ");
+								if (!getAdapter().substituteAssignedExpression(varDecl.type, varDecl.init)) {
+									print(varDecl.init);
+								}
+							}
+						}
+					}
 				}
 			}
 		}
-	}
-
-	private boolean isVarargs(JCVariableDecl varDecl) {
-		return (varDecl.mods.flags & Flags.VARARGS) == Flags.VARARGS;
-	}
-
-	private boolean hasVarargs(MethodSymbol methodSymbol) {
-		return methodSymbol != null && methodSymbol.getParameters().length() > 0 && (methodSymbol.flags() & Flags.VARARGS) != 0;
 	}
 
 	@Override
@@ -932,7 +2003,6 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 	@Override
 	public void visitImport(JCImport importDecl) {
-		imports.add(importDecl);
 		String qualId = importDecl.getQualifiedIdentifier().toString();
 		if (qualId.endsWith("*") && !qualId.endsWith("." + JSweetConfig.GLOBALS_CLASS_NAME + ".*")) {
 			report(importDecl, JSweetProblem.WILDCARD_IMPORT);
@@ -940,24 +2010,44 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		}
 		String adaptedQualId = getAdapter().needsImport(importDecl, qualId);
 		if (adaptedQualId != null && adaptedQualId.contains(".")) {
-			String[] namePath = adaptedQualId.split("\\.");
-			String name = namePath[namePath.length - 1];
-			name = getAdapter().getIdentifier(name);
-			if (context.useModules) {
-				if (!context.getImportedNames(compilationUnit.packge).contains(name)) {
-					print("import ").print(name).print(" = ").print(adaptedQualId).print(";");
-					context.registerImportedName(compilationUnit.packge, name);
+			if (importDecl.isStatic() && !qualId.contains("." + JSweetConfig.GLOBALS_CLASS_NAME + ".")) {
+				if (!context.bundleMode) {
+					print(VAR_DECL_KEYWORD + " ").print(qualId.substring(qualId.lastIndexOf('.') + 1)).print(": any = ").print(qualId).print(";");
 				}
 			} else {
-				if (topLevelPackage == null) {
-					if (context.globalImports.contains(name)) {
-						// Tsc global package does allow multiple import with
-						// the same name in the global namespace (bug?)
-						return;
-					}
-					context.globalImports.add(name);
+				String[] namePath;
+				if (context.useModules && importDecl.isStatic()) {
+					namePath = qualId.split("\\.");
+				} else {
+					namePath = adaptedQualId.split("\\.");
 				}
-				print("import ").print(name).print(" = ").print(adaptedQualId).print(";");
+				String name = namePath[namePath.length - 1];
+				if (context.useModules) {
+					if (!adaptedQualId.startsWith(GLOBALS_PACKAGE_NAME)) {
+						if (!context.getImportedNames(compilationUnit.getSourceFile().getName()).contains(name)) {
+							print("import ").print(name).print(" = ").print(adaptedQualId).print(";");
+							context.registerImportedName(compilationUnit.getSourceFile().getName(), null, name);
+						}
+					}
+				} else {
+					if (topLevelPackage == null) {
+						if (context.globalImports.contains(name)) {
+							// Tsc global package does allow multiple import
+							// with
+							// the same name in the global namespace (bug?)
+							return;
+						}
+						context.globalImports.add(name);
+					}
+					if (context.bundleMode) {
+						// in bundle mode, we do not use imports to minimize
+						// dependencies
+						// (imports create unavoidable dependencies!)
+						context.importedTopPackages.add(namePath[0]);
+					} else {
+						print("import ").print(name).print(" = ").print(adaptedQualId).print(";");
+					}
+				}
 			}
 		}
 
@@ -967,15 +2057,68 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 	public void visitSelect(JCFieldAccess fieldAccess) {
 		if (!getAdapter().substituteFieldAccess(fieldAccess)) {
 			if ("class".equals(fieldAccess.name.toString())) {
-				print(fieldAccess.selected);
+				if (fieldAccess.type instanceof Type.ClassType && Util.isInterface(((Type.ClassType) fieldAccess.type).typarams_field.head.tsym)) {
+					print("\"").print(Util.getRootRelativeJavaName(((Type.ClassType) fieldAccess.type).typarams_field.head.tsym)).print("\"");
+				} else {
+					print(fieldAccess.selected);
+				}
+			} else if ("this".equals(fieldAccess.name.toString()) && getScope().innerClassNotStatic) {
+				print("this." + PARENT_CLASS_FIELD_NAME);
+			} else if ("this".equals(fieldAccess.name.toString())) {
+				print("this");
 			} else {
-				print(fieldAccess.selected).print(".").printIdentifier(fieldAccess.name.toString());
+				// if (Util.isIntegral(fieldAccess.type)) {
+				// print("(");
+				// }
+
+				String selected = fieldAccess.selected.toString();
+				if (!selected.equals(GLOBALS_CLASS_NAME)) {
+					if (selected.equals("super") && (fieldAccess.sym instanceof VarSymbol)) {
+						print("this.");
+					} else {
+						boolean accessSubstituted = false;
+						if (fieldAccess.sym instanceof VarSymbol) {
+							VarSymbol varSym = (VarSymbol) fieldAccess.sym;
+							if (varSym.isStatic() && varSym.owner.isInterface() && varSym.owner != Util.getSymbol(fieldAccess.selected)) {
+								accessSubstituted = true;
+								if (context.useModules) {
+									// TODO: we assume it has been imported, but
+									// it is clearly not always the case (to be
+									// tested)
+									print(varSym.owner.getSimpleName().toString()).print(".");
+								} else {
+									print(Util.getRootRelativeName(null, varSym.owner)).print(".");
+								}
+							}
+						}
+						if (!accessSubstituted) {
+							print(fieldAccess.selected).print(".");
+						}
+					}
+				}
+
+				if (fieldAccess.sym instanceof VarSymbol && context.getFieldNameMapping(fieldAccess.sym) != null) {
+					print(context.getFieldNameMapping(fieldAccess.sym));
+				} else {
+					printIdentifier(fieldAccess.sym);
+				}
+				if (fieldAccess.sym instanceof VarSymbol && !fieldAccess.sym.owner.isEnum() && context.lazyInitializedStatics.contains(fieldAccess.sym)) {
+					if (!staticInitializedAssignment) {
+						print(STATIC_INITIALIZATION_SUFFIX + "()");
+					}
+				}
+				// if (Util.isIntegral(fieldAccess.type)) {
+				// print("|0)");
+				// }
 			}
 		}
 	}
 
-	private JCImport getStaticImport(String methName) {
-		for (JCImport i : imports) {
+	private JCImport getStaticGlobalImport(String methName) {
+		if (getCompilationUnit() == null) {
+			return null;
+		}
+		for (JCImport i : getCompilationUnit().getImports()) {
 			if (i.staticImport) {
 				if (i.qualid.toString().endsWith(JSweetConfig.GLOBALS_CLASS_NAME + "." + methName)) {
 					return i;
@@ -1018,7 +2161,7 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		if (!getAdapter().substituteMethodInvocation(inv)) {
 			String meth = inv.meth.toString();
 			String methName = meth.substring(meth.lastIndexOf('.') + 1);
-			if (methName.equals("super") && removedSuperclass) {
+			if (methName.equals("super") && getScope().removedSuperclass) {
 				return;
 			}
 
@@ -1030,19 +2173,20 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 			boolean anonymous = JSweetConfig.ANONYMOUS_FUNCTION_NAME.equals(methName) || JSweetConfig.ANONYMOUS_STATIC_FUNCTION_NAME.equals(methName)
 					|| JSweetConfig.NEW_FUNCTION_NAME.equals(methName);
-			boolean targetIsThisOrStaticImported = meth.startsWith(methName) || meth.startsWith("this.");
+			boolean targetIsThisOrStaticImported = meth.equals(methName) || meth.equals("this." + methName);
 
-			MethodType type = (MethodType) inv.meth.type;
+			MethodType type = inv.meth.type instanceof MethodType ? (MethodType) inv.meth.type : null;
 			MethodSymbol methSym = null;
 			String methodName = null;
 			boolean keywordHandled = false;
 			if (targetIsThisOrStaticImported) {
-				JCImport staticImport = getStaticImport(methName);
+				JCImport staticImport = getStaticGlobalImport(methName);
 				if (staticImport == null) {
-					methSym = Util.findMethodDeclarationInType(context.types, getParent(JCClassDecl.class).sym, methName, type);
+					JCClassDecl p = getParent(JCClassDecl.class);
+					methSym = p == null ? null : Util.findMethodDeclarationInType(context.types, p.sym, methName, type);
 					if (methSym != null) {
 						typeChecker.checkApply(inv, methSym);
-						if (!methSym.getModifiers().contains(Modifier.STATIC)) {
+						if (!methSym.isStatic()) {
 							if (!meth.startsWith("this.")) {
 								print("this");
 								if (!anonymous) {
@@ -1050,19 +2194,83 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 								}
 							}
 						} else {
+							if (meth.startsWith("this.") && methSym.isStatic()) {
+								report(inv, JSweetProblem.CANNOT_ACCESS_STATIC_MEMBER_ON_THIS, methSym.getSimpleName());
+							}
 							if (!JSweetConfig.GLOBALS_CLASS_NAME.equals(methSym.owner.getSimpleName().toString())) {
 								print("" + methSym.owner.getSimpleName());
+								if (methSym.owner.isEnum()) {
+									print(ENUM_WRAPPER_CLASS_SUFFIX);
+								}
 								if (!anonymous) {
 									print(".");
 								}
 							}
 						}
+					} else {
+						if (getScope().defaultMethodScope) {
+							TypeSymbol target = Util.getStaticImportTarget(getContext().getDefaultMethodCompilationUnit(getParent(JCMethodDecl.class)),
+									methName);
+							if (target != null) {
+								print(getRootRelativeName(target) + ".");
+							}
+						} else {
+							TypeSymbol target = Util.getStaticImportTarget(compilationUnit, methName);
+							if (target != null) {
+								print(getRootRelativeName(target) + ".");
+							}
+						}
+
+						if (getScope().innerClass) {
+							JCClassDecl parent = getParent(JCClassDecl.class);
+							int level = 0;
+							MethodSymbol method = null;
+							if (parent != null) {
+								while (getScope(level++).innerClass) {
+									parent = getParent(JCClassDecl.class, parent);
+									if ((method = Util.findMethodDeclarationInType(context.types, parent.sym, methName, type)) != null) {
+										break;
+									}
+								}
+							}
+							if (method != null) {
+								if (method.isStatic()) {
+									print(method.getEnclosingElement().getSimpleName().toString() + ".");
+								} else {
+									print("this.");
+									for (int i = 0; i < level; i++) {
+										print(PARENT_CLASS_FIELD_NAME + ".");
+									}
+									if (anonymous) {
+										removeLastChar();
+									}
+								}
+							}
+						}
+
 					}
 				} else {
 					JCFieldAccess staticFieldAccess = (JCFieldAccess) staticImport.qualid;
 					methSym = Util.findMethodDeclarationInType(context.types, staticFieldAccess.selected.type.tsym, methName, type);
+					if (methSym != null) {
+						Map<String, VarSymbol> vars = new HashMap<>();
+						Util.fillAllVariablesInScope(vars, getStack(), inv, getParent(JCMethodDecl.class));
+						if (vars.containsKey(methSym.getSimpleName().toString())) {
+							report(inv, JSweetProblem.HIDDEN_INVOCATION, methSym.getSimpleName());
+						}
+						if (context.bundleMode && methSym.owner.getSimpleName().toString().equals(GLOBALS_CLASS_NAME) && methSym.owner.owner != null
+								&& !methSym.owner.owner.getSimpleName().toString().equals(GLOBALS_PACKAGE_NAME)) {
+							String prefix = getRootRelativeName(methSym.owner.owner);
+							if (!StringUtils.isEmpty(prefix)) {
+								print(getRootRelativeName(methSym.owner.owner) + ".");
+							}
+						}
+					}
 					// staticImported = true;
-					if (JSweetConfig.TS_STRICT_MODE_KEYWORDS.contains(methName.toLowerCase())) {
+					if (JSweetConfig.TS_STRICT_MODE_KEYWORDS.contains(Util.getActualName(methSym))) {
+						// if (context.useModules) {
+						// keywordHandled = true;
+						// } else {
 						// if method is a reserved TS keyword, no "static
 						// import" possible, fully qualified mode
 						String targetClass = getStaticContainerFullName(staticImport);
@@ -1074,11 +2282,15 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 						if (JSweetConfig.isLibPath(methSym.getEnclosingElement().getQualifiedName().toString())) {
 							methodName = methName.toLowerCase();
 						}
+						// }
 					}
 				}
 			} else {
 				if (inv.meth instanceof JCFieldAccess) {
 					JCExpression selected = ((JCFieldAccess) inv.meth).selected;
+					if (Util.hasAnnotationType(selected.type.tsym, FunctionalInterface.class.getName())) {
+						anonymous = true;
+					}
 					methSym = Util.findMethodDeclarationInType(context.types, selected.type.tsym, methName, type);
 					if (methSym != null) {
 						typeChecker.checkApply(inv, methSym);
@@ -1087,10 +2299,11 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 			}
 
 			boolean isStatic = methSym == null || methSym.isStatic();
-			if (!hasVarargs(methSym) //
-					|| inv.args.last().type.getKind() != TypeKind.ARRAY
-					// we dont use apply if var args type differ
-					|| !((ArrayType) inv.args.last().type).elemtype.equals(((ArrayType) methSym.params().last().type).elemtype)) {
+			if (!Util.hasVarargs(methSym) //
+					|| !inv.args.isEmpty() && (inv.args.last().type.getKind() != TypeKind.ARRAY
+							// we dont use apply if var args type differ
+							|| !context.types.erasure(((ArrayType) inv.args.last().type).elemtype)
+									.equals(context.types.erasure(((ArrayType) methSym.getParameters().last().type).elemtype)))) {
 				applyVarargs = false;
 			}
 
@@ -1125,7 +2338,7 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 					if (keywordHandled) {
 						print(inv.meth);
 					} else {
-						if (methSym == null && inv.meth instanceof JCFieldAccess) {
+						if (methSym == null && inv.meth instanceof JCFieldAccess && ((JCFieldAccess) inv.meth).sym instanceof MethodSymbol) {
 							methSym = (MethodSymbol) ((JCFieldAccess) inv.meth).sym;
 						}
 						if (methSym != null && inv.meth instanceof JCFieldAccess) {
@@ -1143,15 +2356,26 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 			if (applyVarargs) {
 				print(".apply");
-			}
-
-			if (inv.typeargs != null && !inv.typeargs.isEmpty()) {
-				print("<");
-				for (JCExpression argument : inv.typeargs) {
-					getAdapter().substituteAndPrintType(argument).print(",");
+			} else {
+				if (inv.typeargs != null && !inv.typeargs.isEmpty()) {
+					print("<");
+					for (JCExpression argument : inv.typeargs) {
+						getAdapter().substituteAndPrintType(argument).print(",");
+					}
+					removeLastChar();
+					print(">");
+				} else {
+					// force type arguments to any because they are inferred to
+					// {} by default
+					if (methSym != null && !methSym.getTypeParameters().isEmpty()) {
+						// invalid overload type parameters are erased
+						Overload overload = context.getOverload((ClassSymbol) methSym.getEnclosingElement(), methSym);
+						boolean inOverload = overload != null && overload.methods.size() > 1;
+						if (!(inOverload && context.isInvalidOverload(methSym))) {
+							printAnyTypeArguments(methSym.getTypeParameters().size());
+						}
+					}
 				}
-				removeLastChar();
-				print(">");
 			}
 
 			print("(");
@@ -1171,9 +2395,26 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 			}
 
 			int argsLength = applyVarargs ? inv.args.size() - 1 : inv.args.size();
+
+			if (getScope().innerClassNotStatic && "super".equals(methName)) {
+				TypeSymbol s = getParent(JCClassDecl.class).extending.type.tsym;
+				if (s.getEnclosingElement() instanceof ClassSymbol && !s.isStatic()) {
+					print(PARENT_CLASS_FIELD_NAME);
+					if (argsLength > 0) {
+						print(", ");
+					}
+				}
+			}
+
 			for (int i = 0; i < argsLength; i++) {
 				JCExpression arg = inv.args.get(i);
-				print(arg);
+				if (inv.meth.type != null) {
+					List<Type> argTypes = ((MethodType) inv.meth.type).argtypes;
+					Type paramType = i < argTypes.size() ? argTypes.get(i) : argTypes.get(argTypes.size() - 1);
+					if (!getAdapter().substituteAssignedExpression(paramType, arg)) {
+						print(arg);
+					}
+				}
 				if (i < argsLength - 1) {
 					print(", ");
 				}
@@ -1200,33 +2441,179 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 	@Override
 	public void visitIdent(JCIdent ident) {
+		// if (Util.isIntegral(ident.type) && getParent() instanceof JCBinary) {
+		// print("(");
+		// }
+		// String name = ident.sym == null ? ident.toString() :
+		// getAdapter().getIdentifier(ident.sym);
+
 		String name = ident.toString();
+
+		if (getScope().inlinedConstructorArgs != null) {
+			if (ident.sym instanceof VarSymbol && getScope().inlinedConstructorArgs.contains(name)) {
+				print("__args[" + getScope().inlinedConstructorArgs.indexOf(name) + "]");
+				return;
+			}
+		}
+
 		if (!getAdapter().substituteIdentifier(ident)) {
+			boolean lazyInitializedStatic = false;
 			// add this of class name if ident is a field
 			if (ident.sym instanceof VarSymbol && !ident.sym.name.equals(context.names._this) && !ident.sym.name.equals(context.names._super)) {
 				VarSymbol varSym = (VarSymbol) ident.sym; // findFieldDeclaration(currentClass,
 				// ident.name);
 				if (varSym != null) {
 					if (varSym.owner instanceof ClassSymbol) {
+						if (context.getFieldNameMapping(varSym) != null) {
+							name = context.getFieldNameMapping(varSym);
+						}
 						if (!varSym.getModifiers().contains(Modifier.STATIC)) {
 							print("this.");
+							JCClassDecl parent = getParent(JCClassDecl.class);
+							int level = 0;
+							boolean foundInParent = false;
+							while (getScope(level++).innerClassNotStatic) {
+								parent = getParent(JCClassDecl.class, parent);
+								if (varSym.owner == parent.sym) {
+									foundInParent = true;
+									break;
+								}
+							}
+							if (foundInParent) {
+								for (int i = 0; i < level; i++) {
+									print(PARENT_CLASS_FIELD_NAME + ".");
+								}
+							}
 						} else {
-							print(varSym.owner.getSimpleName() + ".");
+							if (context.lazyInitializedStatics.contains(varSym)) {
+								lazyInitializedStatic = true;
+							}
+							if (!varSym.owner.getQualifiedName().toString().endsWith("." + GLOBALS_CLASS_NAME)) {
+								if (context.bundleMode && !varSym.owner.equals(getParent(JCClassDecl.class).sym)) {
+									String prefix = Util.getRootRelativeName(null, varSym.owner);
+									if (!StringUtils.isEmpty(prefix)) {
+										print(Util.getRootRelativeName(null, varSym.owner) + ".");
+									}
+								} else {
+									if (!varSym.owner.getSimpleName().toString().equals(GLOBALS_PACKAGE_NAME)) {
+										print(varSym.owner.getSimpleName() + ".");
+									}
+								}
+							} else {
+								if (context.bundleMode) {
+									String prefix = Util.getRootRelativeName(null, varSym.owner);
+									prefix = prefix.substring(0, prefix.length() - GLOBALS_CLASS_NAME.length());
+									if (!prefix.equals(GLOBALS_PACKAGE_NAME + ".") && !prefix.endsWith("." + GLOBALS_PACKAGE_NAME + ".")) {
+										print(prefix);
+									}
+								}
+							}
 						}
 					} else {
-						if (JSweetConfig.JS_KEYWORDS.contains(name)) {
-							name = "_jsweet_" + name;
+						if (varSym.owner instanceof MethodSymbol && isAnonymousClass
+								&& getScope(1).finalVariables.get(getScope(1).anonymousClasses.indexOf(getParent(JCClassDecl.class))).contains(varSym)) {
+							print("this.");
+						} else {
+							if (context.bundleMode && varSym.owner instanceof MethodSymbol) {
+								if (context.importedTopPackages.contains(name)) {
+									name = "__var_" + name;
+								}
+							}
+							if (JSweetConfig.JS_KEYWORDS.contains(name)) {
+								name = JSweetConfig.JS_KEYWORD_PREFIX + name;
+							}
 						}
 					}
 				}
 			}
-			printIdentifier(name);
+			if (ident.sym instanceof ClassSymbol) {
+				ClassSymbol clazz = (ClassSymbol) ident.sym;
+				boolean prefixAdded = false;
+				if (getScope().defaultMethodScope) {
+					if (Util.isImported(getContext().getDefaultMethodCompilationUnit(getParent(JCMethodDecl.class)), clazz)) {
+						print(getRootRelativeName(clazz.getEnclosingElement()) + ".");
+						prefixAdded = true;
+					}
+				}
+				// add parent class name if ident is an inner class of the
+				// current class
+				if (!prefixAdded && clazz.getEnclosingElement() instanceof ClassSymbol) {
+					if (context.useModules) {
+						print(clazz.getEnclosingElement().getSimpleName() + ".");
+						prefixAdded = true;
+					} else {
+						// if the class has not been imported, we need to add
+						// the containing class prefix
+						if (!getCompilationUnit().getImports().stream().map(i -> i.qualid.type == null ? null : i.qualid.type.tsym).anyMatch(t -> t == clazz)) {
+							print(clazz.getEnclosingElement().getSimpleName() + ".");
+							prefixAdded = true;
+						}
+					}
+				}
+				if (!prefixAdded && context.bundleMode && !clazz.equals(getParent(JCClassDecl.class).sym)) {
+					print(getRootRelativeName(clazz));
+				} else {
+					print(name);
+				}
+			} else {
+				print(name);
+				if (lazyInitializedStatic) {
+					if (!staticInitializedAssignment) {
+						print(STATIC_INITIALIZATION_SUFFIX + "()");
+					}
+				}
+			}
 		}
+		// if (Util.isIntegral(ident.type) && getParent() instanceof JCBinary) {
+		// print("|0)");
+		// }
 	}
+
+	// private boolean isLazyInitializedAssignment(JCTree access) {
+	// JCTree assign = getFirstParent(JCAssign.class, JCAssignOp.class);
+	// if (assign != null) {
+	// boolean[] found = { false };
+	// new TreeScanner() {
+	// public void scan(JCTree tree) {
+	// if (tree == access) {
+	// found[0] = true;
+	// }
+	// }
+	// }.scan(assign instanceof JCAssignOp ? ((JCAssignOp) assign).lhs :
+	// ((JCAssign) assign).lhs);
+	// return found[0];
+	// } else {
+	// return false;
+	// }
+	// }
 
 	@Override
 	public void visitTypeApply(JCTypeApply typeApply) {
 		getAdapter().substituteAndPrintType(typeApply);
+	}
+
+	private int initAnonymousClass(JCNewClass newClass) {
+		int anonymousClassIndex = getScope().anonymousClasses.indexOf(newClass.def);
+		if (anonymousClassIndex == -1) {
+			anonymousClassIndex = getScope().anonymousClasses.size();
+			getScope().anonymousClasses.add(newClass.def);
+			getScope().anonymousClassesConstructors.add(newClass);
+			LinkedHashSet<VarSymbol> finalVars = new LinkedHashSet<>();
+			getScope().finalVariables.add(finalVars);
+			new TreeScanner() {
+				public void visitIdent(JCIdent var) {
+					if (var.sym != null && (var.sym instanceof VarSymbol)) {
+						VarSymbol varSymbol = (VarSymbol) var.sym;
+						if (varSymbol.getEnclosingElement() instanceof MethodSymbol
+								&& varSymbol.getEnclosingElement().getEnclosingElement() == getParent(JCClassDecl.class).sym) {
+							finalVars.add((VarSymbol) var.sym);
+						}
+					}
+				}
+			}.visitClassDef(newClass.def);
+
+		}
+		return anonymousClassIndex;
 	}
 
 	@Override
@@ -1238,13 +2625,37 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		}
 		boolean isInterface = Util.isInterface(clazz);
 		if (newClass.def != null || isInterface) {
+			if (Util.isAnonymousClass(newClass)) {
+				int anonymousClassIndex = initAnonymousClass(newClass);
+				print("new ").print(getScope().name + "." + getScope().name + ANONYMOUS_PREFIX + anonymousClassIndex);
+				if (newClass.def.getModifiers().getFlags().contains(Modifier.STATIC)) {
+					printAnonymousClassTypeArgs(newClass);
+				}
+				print("(").printConstructorArgList(newClass).print(")");
+				return;
+			}
+
 			if (isInterface || Util.hasAnnotationType(newClass.clazz.type.tsym, JSweetConfig.ANNOTATION_OBJECT_TYPE)) {
+				if (isInterface) {
+					// print("<").print(newClass.clazz).print(">");
+					print("<any>");
+				}
+
+				Set<String> interfaces = new HashSet<>();
+				if (getContext().options.isInterfaceTracking()) {
+					Util.grabSupportedInterfaceNames(interfaces, clazz);
+					if (!interfaces.isEmpty()) {
+						print("Object.defineProperty(");
+					}
+				}
 				print("{").println().startIndent();
+				boolean statementPrinted = false;
+				boolean initializationBlockFound = false;
 				if (newClass.def != null) {
 					for (JCTree m : newClass.def.getMembers()) {
 						if (m instanceof JCBlock) {
+							initializationBlockFound = true;
 							List<VarSymbol> initializedVars = new ArrayList<>();
-							boolean statementPrinted = false;
 							for (JCTree s : ((JCBlock) m).stats) {
 								boolean currentStatementPrinted = false;
 								if (s instanceof JCExpressionStatement && ((JCExpressionStatement) s).expr instanceof JCAssign) {
@@ -1301,7 +2712,29 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 						}
 					}
 				}
+				if (!statementPrinted && !initializationBlockFound) {
+					for (Symbol s : clazz.getEnclosedElements()) {
+						if (s instanceof VarSymbol) {
+							if (!Util.hasAnnotationType(s, JSweetConfig.ANNOTATION_OPTIONAL)) {
+								report(newClass, JSweetProblem.UNINITIALIZED_FIELD, s);
+							}
+						}
+					}
+				}
+
 				println().endIndent().printIndent().print("}");
+				if (getContext().options.isInterfaceTracking()) {
+					if (!interfaces.isEmpty()) {
+						print(", '" + INTERFACES_FIELD_NAME + "', { configurable: true, value: ");
+						print("[");
+						for (String i : interfaces) {
+							print("\"").print(i).print("\",");
+						}
+						removeLastChar();
+						print("]");
+						print(" })");
+					}
+				}
 			} else {
 
 				// ((target : DataStruct3) => {
@@ -1367,38 +2800,179 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 			} else {
 				if (!getAdapter().substituteNewClass(newClass)) {
 					if (typeChecker.checkType(newClass, null, newClass.clazz)) {
-						print("new ").print(newClass.clazz).print("(").printArgList(newClass.args).print(")");
+
+						boolean applyVarargs = true;
+						MethodSymbol methSym = (MethodSymbol) newClass.constructor;
+						if (newClass.args.size() == 0 || !Util.hasVarargs(methSym) //
+								|| newClass.args.last().type.getKind() != TypeKind.ARRAY
+								// we dont use apply if var args type differ
+								|| !context.types.erasure(((ArrayType) newClass.args.last().type).elemtype)
+										.equals(context.types.erasure(((ArrayType) methSym.getParameters().last().type).elemtype))) {
+							applyVarargs = false;
+						}
+						if (applyVarargs) {
+							// this is necessary in case the user defines a
+							// Function class that hides the global Function
+							// class
+							context.addGlobalsMapping("Function", "__Function");
+							print("<any>new (__Function.prototype.bind.apply(").print(newClass.clazz).print(", [null");
+							for (int i = 0; i < newClass.args.length() - 1; i++) {
+								print(", ").print(newClass.args.get(i));
+							}
+							print("].concat(<any[]>").print(newClass.args.last()).print(")))");
+						} else {
+							if (newClass.clazz instanceof JCTypeApply) {
+								JCTypeApply typeApply = (JCTypeApply) newClass.clazz;
+								print("new ").print(typeApply.clazz);
+								if (!typeApply.arguments.isEmpty()) {
+									print("<").printTypeArgList(typeApply.arguments).print(">");
+								} else {
+									// erase types since the diamond (<>)
+									// operator
+									// does not exists in TypeScript
+									printAnyTypeArguments(((ClassSymbol) newClass.clazz.type.tsym).getTypeParameters().length());
+								}
+								print("(").printConstructorArgList(newClass).print(")");
+							} else {
+								print("new ").print(newClass.clazz).print("(").printConstructorArgList(newClass).print(")");
+							}
+						}
 					}
 				}
 			}
 		}
+
+	}
+
+	private void printAnyTypeArguments(int count) {
+		print("<");
+		for (int i = 0; i < count; i++) {
+			print("any, ");
+		}
+		if (count > 0) {
+			removeLastChars(2);
+		}
+		print(">");
+
+	}
+
+	@Override
+	public AbstractTreePrinter printConstructorArgList(JCNewClass newClass) {
+		boolean printed = false;
+		if ((getScope().anonymousClasses.contains(newClass.def) && !newClass.def.getModifiers().getFlags().contains(Modifier.STATIC))) {
+			print("this");
+			if (!newClass.args.isEmpty()) {
+				print(", ");
+			}
+			printed = true;
+		} else if ((newClass.clazz.type.tsym.getEnclosingElement() instanceof ClassSymbol
+				&& !newClass.clazz.type.tsym.getModifiers().contains(Modifier.STATIC))) {
+			print("this");
+			JCClassDecl parent = getParent(JCClassDecl.class);
+			ClassSymbol parentSymbol = parent == null ? null : parent.sym;
+			if (newClass.clazz.type.tsym.getEnclosingElement() != parentSymbol) {
+				print("." + PARENT_CLASS_FIELD_NAME);
+			}
+			if (!newClass.args.isEmpty()) {
+				print(", ");
+			}
+			printed = true;
+		}
+
+		printArgList(newClass.args);
+		int index = getScope().anonymousClasses.indexOf(newClass.def);
+		if (index >= 0 && !getScope().finalVariables.get(index).isEmpty()) {
+			if (printed || !newClass.args.isEmpty()) {
+				print(", ");
+			}
+			for (VarSymbol v : getScope().finalVariables.get(index)) {
+				print(v.getSimpleName().toString());
+				print(", ");
+			}
+			removeLastChars(2);
+		}
+		return this;
 	}
 
 	@Override
 	public void visitLiteral(JCLiteral literal) {
 		String s = literal.toString();
-		if (literal.typetag == TypeTag.FLOAT) {
+		switch (literal.typetag) {
+		case FLOAT:
 			if (s.endsWith("F")) {
 				s = s.substring(0, s.length() - 1);
 			}
+			break;
+		case LONG:
+			if (s.endsWith("L")) {
+				s = s.substring(0, s.length() - 1);
+			}
+			break;
+		// case CLASS:
+		// if (literal.value instanceof String) {
+		// //s = "\"" + StringEscapeUtils.escapeJava(((String) literal.value)) +
+		// "\"";
+		// //s = "\"" + s + "\"";
+		// }
+		// break;
+		// case CHAR:
+		// s = "\"" + new String(Character.toChars((int)
+		// literal.value)).replace("\\", "\\\\") + "\"";
+		// break;
+		default:
 		}
 		print(s);
 	}
 
 	@Override
 	public void visitIndexed(JCArrayAccess arrayAccess) {
+		// if (Util.isIntegral(arrayAccess.type)) {
+		// print("(");
+		// }
 		print(arrayAccess.indexed).print("[").print(arrayAccess.index).print("]");
+		// if (Util.isIntegral(arrayAccess.type)) {
+		// print("|0)");
+		// }
 	}
 
 	@Override
 	public void visitForeachLoop(JCEnhancedForLoop foreachLoop) {
-		String itVarName = "__it_" + Util.getId();
-		String exprVarName = "__expr_" + Util.getId();
-		print("var " + exprVarName + " = ").print(foreachLoop.expr).print("; ");
-		print("for(var " + itVarName + "=0;" + itVarName + "<" + exprVarName + ".length;" + itVarName + "++) { ")
-				.print("var " + foreachLoop.var.name.toString() + "=" + exprVarName + "[" + itVarName + "];").println();
-		startIndent().printIndent().print(foreachLoop.body);
-		endIndent().print("}");
+		String indexVarName = "index" + Util.getId();
+		boolean noVariable = foreachLoop.expr instanceof JCIdent || foreachLoop.expr instanceof JCFieldAccess;
+		boolean[] hasLength = { false };
+		TypeSymbol targetType = foreachLoop.expr.type.tsym;
+		Util.scanMemberDeclarationsInType(targetType, getAdapter().getErasedTypes(), element -> {
+			if (element instanceof VarSymbol) {
+				if ("length".equals(element.getSimpleName().toString()) && Util.isNumber(((VarSymbol) element).type)) {
+					hasLength[0] = true;
+					return false;
+				}
+			}
+			return true;
+		});
+		if (!hasLength[0]) {
+			print("for(" + VAR_DECL_KEYWORD + " " + indexVarName + "=").print(foreachLoop.expr).print(".iterator();" + indexVarName + ".hasNext();) {")
+					.println().startIndent().printIndent();
+			print(VAR_DECL_KEYWORD + " " + foreachLoop.var.name.toString() + " = ").print(indexVarName + ".next();").println();
+		} else {
+			if (noVariable) {
+				print("for(" + VAR_DECL_KEYWORD + " " + indexVarName + "=0; " + indexVarName + " < ").print(foreachLoop.expr)
+						.print("." + "length" + "; " + indexVarName + "++) {").println().startIndent().printIndent();
+				print(VAR_DECL_KEYWORD + " " + foreachLoop.var.name.toString() + " = ").print(foreachLoop.expr).print("[" + indexVarName + "];").println();
+			} else {
+				String arrayVarName = "array" + Util.getId();
+				print("{").println().startIndent().printIndent();
+				print(VAR_DECL_KEYWORD + " " + arrayVarName + " = ").print(foreachLoop.expr).print(";").println().printIndent();
+				print("for(" + VAR_DECL_KEYWORD + " " + indexVarName + "=0; " + indexVarName + " < " + arrayVarName + ".length; " + indexVarName + "++) {")
+						.println().startIndent().printIndent();
+				print(VAR_DECL_KEYWORD + " " + foreachLoop.var.name.toString() + " = " + arrayVarName + "[" + indexVarName + "];").println();
+			}
+		}
+		printIndent().print(foreachLoop.body);
+		endIndent().println().printIndent().print("}");
+		if (!noVariable && hasLength[0]) {
+			endIndent().println().printIndent().print("}");
+		}
 	}
 
 	@Override
@@ -1419,18 +2993,68 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 	@Override
 	public void visitBinary(JCBinary binary) {
-		print(binary.lhs);
-		space().print(binary.operator.name.toString()).space();
-		print(binary.rhs);
+		if (Util.isIntegral(binary.type) && binary.getKind() == Kind.DIVIDE) {
+			if (binary.type.getKind() == TypeKind.LONG) {
+				print("Math.round(");
+			} else {
+				print("(");
+			}
+		}
+		boolean charWrapping = Util.isArithmeticOperator(binary.getKind()) || Util.isComparisonOperator(binary.getKind());
+		if (charWrapping && binary.lhs.type.isPrimitive() && context.symtab.charType.tsym == binary.lhs.type.tsym
+				&& !(binary.rhs.type.tsym == context.symtab.stringType.tsym)) {
+			print("(").print(binary.lhs).print(").charCodeAt(0)");
+		} else {
+			print(binary.lhs);
+		}
+		String op = binary.operator.name.toString();
+		if (binary.lhs.type.getKind() == TypeKind.BOOLEAN) {
+			if ("|".equals(op)) {
+				op = "||";
+			} else if ("&".equals(op)) {
+				op = "&&";
+			} else if ("^".equals(op)) {
+				op = "!==";
+			}
+		}
+		if ("==".equals(op) && !(Util.isNullLiteral(binary.lhs) || Util.isNullLiteral(binary.rhs))) {
+			op = "===";
+		} else if ("!=".equals(op) && !(Util.isNullLiteral(binary.lhs) || Util.isNullLiteral(binary.rhs))) {
+			op = "!==";
+		}
+		space().print(op).space();
+		if (charWrapping && binary.rhs.type.isPrimitive() && context.symtab.charType.tsym == binary.rhs.type.tsym
+				&& !(binary.lhs.type.tsym == context.symtab.stringType.tsym)) {
+			print("(").print(binary.rhs).print(").charCodeAt(0)");
+		} else {
+			print(binary.rhs);
+		}
+		if (Util.isIntegral(binary.type) && binary.getKind() == Kind.DIVIDE) {
+			if (binary.type.getKind() == TypeKind.LONG) {
+				print(")");
+			} else {
+				print("|0)");
+			}
+		}
 	}
 
 	@Override
 	public void visitIf(JCIf ifStatement) {
-		print("if(").print(ifStatement.cond).print(") ");
+		print("if").print(ifStatement.cond).print(" ");
 		print(ifStatement.thenpart);
+		if (!(ifStatement.thenpart instanceof JCBlock)) {
+			if (!statementsWithNoSemis.contains(ifStatement.thenpart.getClass())) {
+				print(";");
+			}
+		}
 		if (ifStatement.elsepart != null) {
 			print(" else ");
 			print(ifStatement.elsepart);
+			if (!(ifStatement.elsepart instanceof JCBlock)) {
+				if (!statementsWithNoSemis.contains(ifStatement.elsepart.getClass())) {
+					print(";");
+				}
+			}
 		}
 	}
 
@@ -1438,15 +3062,59 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 	public void visitReturn(JCReturn returnStatement) {
 		print("return");
 		if (returnStatement.expr != null) {
-			print(" ").print(returnStatement.expr);
+			JCTree parentFunction = getFirstParent(JCMethodDecl.class, JCLambda.class);
+			if (returnStatement.expr.type == null) {
+				report(returnStatement, JSweetProblem.CANNOT_ACCESS_THIS, parentFunction == null ? returnStatement.toString() : parentFunction.toString());
+				return;
+			}
+			print(" ");
+			Type returnType = null;
+			if (parentFunction != null) {
+				if (parentFunction instanceof JCMethodDecl) {
+					returnType = ((JCMethodDecl) parentFunction).restype.type;
+				} else {
+					returnType = ((JCLambda) parentFunction).type;
+				}
+			}
+			if (!getAdapter().substituteAssignedExpression(returnType, returnStatement.expr)) {
+				print(returnStatement.expr);
+			}
+		}
+	}
+
+	private boolean staticInitializedAssignment = false;
+
+	private VarSymbol getStaticInitializedField(JCTree expr) {
+		if (expr instanceof JCIdent) {
+			return context.lazyInitializedStatics.contains(((JCIdent) expr).sym) ? (VarSymbol) ((JCIdent) expr).sym : null;
+		} else if (expr instanceof JCFieldAccess) {
+			return context.lazyInitializedStatics.contains(((JCFieldAccess) expr).sym) ? (VarSymbol) ((JCFieldAccess) expr).sym : null;
+		} else {
+			return null;
 		}
 	}
 
 	@Override
-	public void visitAssignop(JCAssignOp op) {
-		print(op.lhs);
-		print(op.operator.name.toString() + "=");
-		print(op.rhs);
+	public void visitAssignop(JCAssignOp assignOp) {
+		boolean expand = staticInitializedAssignment = (getStaticInitializedField(assignOp.lhs) != null);
+		print(assignOp.lhs);
+		staticInitializedAssignment = false;
+		String op = assignOp.operator.name.toString();
+		if (assignOp.lhs.type.getKind() == TypeKind.BOOLEAN) {
+			if ("|".equals(op)) {
+				print(" = ").print(assignOp.lhs).print(" || ").print(assignOp.rhs);
+				return;
+			} else if ("&".equals(op)) {
+				print(" = ").print(assignOp.lhs).print(" && ").print(assignOp.rhs);
+				return;
+			}
+		}
+		if (expand) {
+			print(" = ").print(assignOp.lhs).print(" " + op + " ").print(assignOp.rhs);
+			return;
+		}
+		print(" " + op + "= ");
+		print(assignOp.rhs);
 	}
 
 	@Override
@@ -1467,20 +3135,23 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 	@Override
 	public void visitContinue(JCContinue continueStatement) {
 		print("continue");
+		if (continueStatement.label != null) {
+			print(" ").print(continueStatement.label.toString());
+		}
 	}
 
 	@Override
 	public void visitBreak(JCBreak breakStatement) {
-		if (breakStatement.label != null) {
-			report(breakStatement, JSweetProblem.LABELS_ARE_NOT_SUPPORTED);
-		}
 		print("break");
+		if (breakStatement.label != null) {
+			print(" ").print(breakStatement.label.toString());
+		}
 	}
 
 	@Override
 	public void visitLabelled(JCLabeledStatement labelledStatement) {
-		report(labelledStatement, JSweetProblem.LABELS_ARE_NOT_SUPPORTED);
-		super.visitLabelled(labelledStatement);
+		print(labelledStatement.label.toString()).print(": ");
+		print(labelledStatement.body);
 	}
 
 	@Override
@@ -1493,28 +3164,57 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		if (newArray.elemtype != null) {
 			typeChecker.checkType(newArray, null, newArray.elemtype);
 		}
-		// if (newArray.elemtype != null) {
-		// print("new ");
-		// newArray.elemtype.accept(this);
-		// }
-		// if (newArray.dims.isEmpty()) {
-		// print("[]");
-		// } else {
-		// for (JCExpression dim : newArray.dims) {
-		// print("[");
-		// dim.accept(this);
-		// print("]");
-		// }
-		// }
-		print("[");
-		if (newArray.elems != null) {
-			printArgList(newArray.elems);
+		if (newArray.dims != null && !newArray.dims.isEmpty()) {
+			if (newArray.dims.size() == 1) {
+				print("new Array(").print(newArray.dims.head).print(")");
+			} else {
+				print("<any> (function(dims) { " + VAR_DECL_KEYWORD + " allocate = function(dims) { if(dims.length==0) { return undefined; } else { "
+						+ VAR_DECL_KEYWORD + " array = []; for(" + VAR_DECL_KEYWORD
+						+ " i = 0; i < dims[0]; i++) { array.push(allocate(dims.slice(1))); } return array; }}; return allocate(dims);})");
+				print("([");
+				printArgList(newArray.dims);
+				print("])");
+			}
+		} else {
+			print("[");
+			if (newArray.elems != null) {
+				printArgList(newArray.elems);
+			}
+			print("]");
 		}
-		print("]");
 	}
+
+	boolean inRollback = false;
 
 	@Override
 	public void visitUnary(JCUnary unary) {
+		if (getContext().options.isSupportSaticLazyInitialization()) {
+			if (!inRollback) {
+				JCStatement statement = null;
+				VarSymbol[] staticInitializedField = { null };
+				switch (unary.getTag()) {
+				case POSTDEC:
+				case POSTINC:
+				case PREDEC:
+				case PREINC:
+					staticInitializedAssignment = (staticInitializedField[0] = getStaticInitializedField(unary.arg)) != null;
+					if (staticInitializedAssignment) {
+						statement = getParent(JCStatement.class);
+					}
+				default:
+				}
+				if (statement != null) {
+					rollback(statement, tree -> {
+						print(Util.getRootRelativeName(null, staticInitializedField[0].getEnclosingElement())).print(".")
+								.print(staticInitializedField[0].getSimpleName().toString() + STATIC_INITIALIZATION_SUFFIX + "();").println().printIndent();
+						inRollback = true;
+						scan(tree);
+					});
+				}
+			} else {
+				inRollback = false;
+			}
+		}
 		switch (unary.getTag()) {
 		case POS:
 			print("+").print(unary.arg);
@@ -1553,7 +3253,11 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 			if (caseStatement.pat.type.isPrimitive() || String.class.getName().equals(caseStatement.pat.type.toString())) {
 				print(caseStatement.pat);
 			} else {
-				print(getRootRelativeName(caseStatement.pat.type.tsym) + "." + caseStatement.pat);
+				if (context.useModules) {
+					print(caseStatement.pat.type.tsym.getSimpleName() + "." + caseStatement.pat);
+				} else {
+					print(getRootRelativeName(caseStatement.pat.type.tsym) + "." + caseStatement.pat);
+				}
 			}
 		} else {
 			print("default");
@@ -1573,10 +3277,27 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 	@Override
 	public void visitTypeCast(JCTypeCast cast) {
+		if (getAdapter().substituteAssignedExpression(cast.type, cast.expr)) {
+			return;
+		}
+		if (Util.isIntegral(cast.type)) {
+			if (cast.type.getKind() == TypeKind.LONG) {
+				print("Math.round(");
+			} else {
+				print("(");
+			}
+		}
 		if (getAdapter().needsTypeCast(cast)) {
 			print("<").getAdapter().substituteAndPrintType(cast.clazz).print(">");
 		}
 		print(cast.expr);
+		if (Util.isIntegral(cast.type)) {
+			if (cast.type.getKind() == TypeKind.LONG) {
+				print(")");
+			} else {
+				print("|0)");
+			}
+		}
 	}
 
 	@Override
@@ -1595,7 +3316,12 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 	@Override
 	public void visitAssign(JCAssign assign) {
 		if (!getAdapter().substituteAssignment(assign)) {
-			print(assign.lhs).print(" = ").print(assign.rhs);
+			staticInitializedAssignment = getStaticInitializedField(assign.lhs) != null;
+			print(assign.lhs).print(isAnnotationScope ? ": " : " = ");
+			if (!getAdapter().substituteAssignedExpression(assign.lhs.type, assign.rhs)) {
+				print(assign.rhs);
+			}
+			staticInitializedAssignment = false;
 		}
 	}
 
@@ -1607,12 +3333,20 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		if (tryStatement.catchers.isEmpty() && tryStatement.finalizer == null) {
 			report(tryStatement, JSweetProblem.TRY_WITHOUT_CATCH_OR_FINALLY);
 		}
-		if (tryStatement.catchers.size() > 1) {
-			report(tryStatement, JSweetProblem.TRY_WITH_MULTIPLE_CATCHES);
-		}
 		print("try ").print(tryStatement.body);
-		for (JCTree catcher : tryStatement.catchers) {
-			print(catcher);
+		if (tryStatement.catchers.size() > 1) {
+			print(" catch(__e) {").startIndent();
+			for (JCCatch catcher : tryStatement.catchers) {
+				println().printIndent().print("if");
+				printInstanceOf("__e", null, catcher.param.type);
+				print(" {").startIndent().println().printIndent();
+				print(catcher.param).print(" = <").print(catcher.param.getType()).print(">__e;").println();
+				printBlockStatements(catcher.body.getStatements());
+				endIndent().println().printIndent().print("}");
+			}
+			endIndent().println().printIndent().print("}");
+		} else if (tryStatement.catchers.size() == 1) {
+			print(tryStatement.catchers.head);
 		}
 		if (tryStatement.finalizer != null) {
 			print(" finally ").print(tryStatement.finalizer);
@@ -1652,15 +3386,15 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 				print(var.name.toString()).print(",");
 			}
 			removeLastChar();
-			print(") => { return ");
+			print(") => {").println().startIndent().printIndent().print("return ");
 		}
-		this.skipTypeAnnotations = true;
+		getScope().skipTypeAnnotations = true;
 		print("(").printArgList(lamba.params).print(") => ");
-		this.skipTypeAnnotations = false;
+		getScope().skipTypeAnnotations = false;
 		print(lamba.body);
 
 		if (!finalVars.isEmpty()) {
-			print("})(");
+			endIndent().println().printIndent().print("})(");
 			for (VarSymbol var : finalVars) {
 				print(var.name.toString()).print(",");
 			}
@@ -1673,13 +3407,16 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 	public void visitReference(JCMemberReference memberReference) {
 		if (memberReference.sym instanceof MethodSymbol) {
 			MethodSymbol method = (MethodSymbol) memberReference.sym;
+			if (getParent() instanceof JCTypeCast) {
+				print("(");
+			}
 			print("(");
-			if (method.params != null) {
-				for (VarSymbol var : method.params) {
+			if (method.getParameters() != null) {
+				for (VarSymbol var : method.getParameters()) {
 					print(var.name.toString());
 					print(",");
 				}
-				if (!method.params.isEmpty()) {
+				if (!method.getParameters().isEmpty()) {
 					removeLastChar();
 				}
 			}
@@ -1690,24 +3427,37 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		if (memberReference.expr.type.toString().endsWith(JSweetConfig.GLOBALS_CLASS_NAME)) {
 			print(memberReference.name.toString());
 		} else {
-			print(memberReference.expr).print(".").print(memberReference.name.toString());
+			if ("<init>".equals(memberReference.name.toString())) {
+				if (context.types.isArray(memberReference.expr.type)) {
+					print("new Array<");
+					getAdapter().substituteAndPrintType(((JCArrayTypeTree) memberReference.expr).elemtype);
+					print(">");
+				} else {
+					print("new ").print(memberReference.expr);
+				}
+			} else {
+				print(memberReference.expr).print(".").print(memberReference.name.toString());
+			}
 		}
 
 		if (memberReference.sym instanceof MethodSymbol) {
 			MethodSymbol method = (MethodSymbol) memberReference.sym;
 
 			print("(");
-			if (method.params != null) {
-				for (VarSymbol var : method.params) {
+			if (method.getParameters() != null) {
+				for (VarSymbol var : method.getParameters()) {
 					print(var.name.toString());
 					print(",");
 				}
-				if (!method.params.isEmpty()) {
+				if (!method.getParameters().isEmpty()) {
 					removeLastChar();
 				}
 			}
 			print(")");
 			print(" }");
+			if (getParent() instanceof JCTypeCast) {
+				print(")");
+			}
 		}
 
 	}
@@ -1718,9 +3468,9 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		if (typeParameter.bounds != null && !typeParameter.bounds.isEmpty()) {
 			print(" extends ");
 			for (JCExpression e : typeParameter.bounds) {
-				getAdapter().substituteAndPrintType(e).print(",");
+				getAdapter().substituteAndPrintType(e).print(" & ");
 			}
-			removeLastChar();
+			removeLastChars(3);
 		}
 	}
 
@@ -1732,12 +3482,77 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 		}
 	}
 
+	private void print(String exprStr, JCTree expr) {
+		if (exprStr == null) {
+			print(expr);
+		} else {
+			print(exprStr);
+		}
+	}
+
+	private void printInstanceOf(String exprStr, JCTree expr, Type type) {
+		if (!(getParent() instanceof JCParens)) {
+			print("(");
+		}
+		if (TYPE_MAPPING.containsKey(type.toString())) {
+			print("typeof ");
+			print(exprStr, expr);
+			print(" === ").print("'" + TYPE_MAPPING.get(type.toString()).toLowerCase() + "'");
+		} else if (type.tsym.isEnum()) {
+			print("typeof ");
+			print(exprStr, expr);
+			print(" === 'number'");
+		} else if (type.toString().startsWith(JSweetConfig.FUNCTION_CLASSES_PACKAGE + ".") || type.toString().startsWith("java.util.function.")
+				|| Runnable.class.getName().equals(type.toString()) || Util.hasAnnotationType(type.tsym, JSweetConfig.ANNOTATION_FUNCTIONAL_INTERFACE)) {
+			print("typeof ");
+			print(exprStr, expr);
+			print(" === 'function'");
+			int parameterCount = Util.getFunctionalTypeParameterCount(type);
+			if (parameterCount != -1) {
+				print(" && (<any>");
+				print(exprStr, expr);
+				print(").length == " + Util.getFunctionalTypeParameterCount(type));
+			}
+		} else {
+			print(exprStr, expr);
+			if (Util.isInterface(type.tsym)) {
+				print(" != null && ");
+				print("(");
+				print(exprStr, expr);
+				print("[\"" + INTERFACES_FIELD_NAME + "\"]").print(" != null && ");
+				print(exprStr, expr);
+				print("[\"" + INTERFACES_FIELD_NAME + "\"].indexOf(\"").print(type.tsym.getQualifiedName().toString()).print("\") >= 0");
+				print(" || ");
+				print(exprStr, expr);
+				print(".constructor != null && ");
+				print(exprStr, expr);
+				print(".constructor[\"" + INTERFACES_FIELD_NAME + "\"]").print(" != null && ");
+				print(exprStr, expr);
+				print(".constructor[\"" + INTERFACES_FIELD_NAME + "\"].indexOf(\"").print(type.tsym.getQualifiedName().toString()).print("\") >= 0");
+				if (CharSequence.class.getName().equals(type.tsym.getQualifiedName().toString())) {
+					print(" || typeof ");
+					print(exprStr, expr);
+					print(" === \"string\"");
+				}
+				print(")");
+			} else {
+				if (type.tsym instanceof TypeVariableSymbol || Object.class.getName().equals(type.tsym.getQualifiedName().toString())) {
+					print(" != null");
+				} else {
+					print(" != null && ");
+					print(exprStr, expr);
+					print(" instanceof ").print(getQualifiedTypeName(type.tsym, false));
+				}
+			}
+		}
+		if (!(getParent() instanceof JCParens)) {
+			print(")");
+		}
+	}
+
 	@Override
 	public void visitTypeTest(JCInstanceOf instanceOf) {
-		if (Util.isInterface(instanceOf.clazz.type.tsym)) {
-			report(instanceOf, JSweetProblem.INVALID_INSTANCEOF_INTERFACE);
-		}
-		print(instanceOf.expr).print(" instanceof ").print(instanceOf.clazz);
+		printInstanceOf(null, instanceOf.expr, instanceOf.clazz.type);
 	}
 
 	@Override
@@ -1747,9 +3562,30 @@ public class Java2TypeScriptTranslator extends AbstractTreePrinter {
 
 	@Override
 	public void visitAssert(JCAssert assertion) {
-		if (!context.ignoreAssertions) {
-			print("if(!(").print(assertion.cond).print(")) throw new Error(\"Assertion error\");");
+		if (!context.options.isIgnoreAssertions()) {
+			String assertCode = assertion.toString().replace("\"", "'");
+			print("if(!(").print(assertion.cond).print(")) throw new Error(\"Assertion error line " + getCurrentLine() + ": " + assertCode + "\");");
 		}
+	}
+
+	@Override
+	public void visitAnnotation(JCAnnotation annotation) {
+		if (!Util.hasAnnotationType(annotation.type.tsym, JSweetConfig.ANNOTATION_DECORATOR)) {
+			return;
+		}
+		printIndent().print("@").print(annotation.getAnnotationType()).print("(");
+		if (annotation.getArguments() != null && !annotation.getArguments().isEmpty()) {
+			isAnnotationScope = true;
+			print(" { ");
+			for (JCExpression e : annotation.getArguments()) {
+				print(e);
+				print(", ");
+			}
+			removeLastChars(2);
+			print(" } ");
+			isAnnotationScope = false;
+		}
+		print(")").println();
 	}
 
 }

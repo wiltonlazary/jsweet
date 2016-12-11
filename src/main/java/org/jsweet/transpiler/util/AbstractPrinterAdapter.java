@@ -16,10 +16,15 @@
  */
 package org.jsweet.transpiler.util;
 
-import static org.jsweet.transpiler.util.Util.getRootRelativeName;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.jsweet.transpiler.JSweetProblem;
 
+import com.sun.tools.javac.code.Symbol;
+import com.sun.tools.javac.code.Symbol.TypeSymbol;
+import com.sun.tools.javac.code.Symbol.TypeVariableSymbol;
+import com.sun.tools.javac.code.Type;
 import com.sun.tools.javac.code.Type.MethodType;
 import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCArrayAccess;
@@ -35,6 +40,7 @@ import com.sun.tools.javac.tree.JCTree.JCNewClass;
 import com.sun.tools.javac.tree.JCTree.JCTypeApply;
 import com.sun.tools.javac.tree.JCTree.JCTypeCast;
 import com.sun.tools.javac.tree.JCTree.JCVariableDecl;
+import com.sun.tools.javac.tree.JCTree.JCWildcard;
 import com.sun.tools.javac.util.Name;
 
 /**
@@ -46,6 +52,21 @@ import com.sun.tools.javac.util.Name;
 public abstract class AbstractPrinterAdapter {
 
 	private AbstractTreePrinter printer;
+
+	/**
+	 * A flags that indicates that this adapter is printing type parameters.
+	 */
+	public boolean inTypeParameters = false;
+
+	/**
+	 * A flags that indicates that this adapter is not substituting types.
+	 */
+	public boolean disableTypeSubstitution = false;
+
+	/**
+	 * A list of type variables to be erased (mapped to any).
+	 */
+	public Set<TypeVariableSymbol> typeVariablesToErase = new HashSet<>();
 
 	/**
 	 * Reports a problem during the printing phase.
@@ -178,7 +199,7 @@ public abstract class AbstractPrinterAdapter {
 		if (importDecl.isStatic()) {
 			return null;
 		} else {
-			return getRootRelativeName(importDecl.getQualifiedIdentifier().type.tsym);
+			return getPrinter().getRootRelativeName(importDecl.getQualifiedIdentifier().type.tsym);
 		}
 	}
 
@@ -190,30 +211,56 @@ public abstract class AbstractPrinterAdapter {
 	}
 
 	public AbstractTreePrinter substituteAndPrintType(JCTree typeTree) {
-		return substituteAndPrintType(typeTree, false);
+		return substituteAndPrintType(typeTree, false, inTypeParameters, true, disableTypeSubstitution);
 	}
 
-	public AbstractTreePrinter substituteAndPrintType(JCTree typeTree, boolean arrayComponent) {
+	public AbstractTreePrinter substituteAndPrintType(JCTree typeTree, boolean arrayComponent, boolean inTypeParameters, boolean completeRawTypes,
+			boolean disableSubstitution) {
 		if (typeTree instanceof JCTypeApply) {
 			JCTypeApply typeApply = ((JCTypeApply) typeTree);
-			substituteAndPrintType(typeApply.clazz, arrayComponent);
+			substituteAndPrintType(typeApply.clazz, arrayComponent, inTypeParameters, false, disableSubstitution);
 			if (!typeApply.arguments.isEmpty()) {
 				getPrinter().print("<");
 				for (JCExpression argument : typeApply.arguments) {
-					substituteAndPrintType(argument, arrayComponent).print(",");
+					substituteAndPrintType(argument, arrayComponent, false, completeRawTypes, false).print(", ");
 				}
 				if (typeApply.arguments.length() > 0) {
-					getPrinter().removeLastChar();
+					getPrinter().removeLastChars(2);
 				}
 				getPrinter().print(">");
 			}
 			return getPrinter();
+		} else if (typeTree instanceof JCWildcard) {
+			JCWildcard wildcard = ((JCWildcard) typeTree);
+			String name = getPrinter().getContext().getWildcardName(wildcard);
+			if (name == null) {
+				return getPrinter().print("any");
+			} else {
+				getPrinter().print(name);
+				if (inTypeParameters) {
+					getPrinter().print(" extends ");
+					return substituteAndPrintType(wildcard.getBound(), arrayComponent, false, completeRawTypes, disableSubstitution);
+				} else {
+					return getPrinter();
+				}
+			}
 		} else {
 			if (typeTree instanceof JCArrayTypeTree) {
-				return substituteAndPrintType(((JCArrayTypeTree) typeTree).elemtype, true).print("[]");
+				return substituteAndPrintType(((JCArrayTypeTree) typeTree).elemtype, true, inTypeParameters, completeRawTypes, disableSubstitution).print("[]");
 			}
-
-			return getPrinter().print(typeTree);
+			if (completeRawTypes && typeTree.type.tsym.getTypeParameters() != null && !typeTree.type.tsym.getTypeParameters().isEmpty()) {
+				// raw type case (Java warning)
+				getPrinter().print(typeTree);
+				getPrinter().print("<");
+				for (int i = 0; i < typeTree.type.tsym.getTypeParameters().length(); i++) {
+					getPrinter().print("any, ");
+				}
+				getPrinter().removeLastChars(2);
+				getPrinter().print(">");
+				return getPrinter();
+			} else {
+				return getPrinter().print(typeTree);
+			}
 		}
 	}
 
@@ -263,8 +310,25 @@ public abstract class AbstractPrinterAdapter {
 	/**
 	 * Gets the adapted identifier string.
 	 */
-	public String getIdentifier(String identifier) {
-		return identifier;
+	public String getIdentifier(Symbol symbol) {
+		return symbol.name.toString();
+	}
+
+	/**
+	 * Returns the qualified type name.
+	 */
+	public String getQualifiedTypeName(TypeSymbol type, boolean globals) {
+		return getPrinter().getRootRelativeName(type);
+	}
+
+	public abstract Set<String> getErasedTypes();
+
+	/**
+	 * Substitutes if required an expression that is being assigned to a given
+	 * type.
+	 */
+	public boolean substituteAssignedExpression(Type assignedType, JCExpression expression) {
+		return false;
 	}
 
 }

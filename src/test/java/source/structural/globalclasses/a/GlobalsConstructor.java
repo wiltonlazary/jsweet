@@ -20,16 +20,19 @@ import static jsweet.util.Globals.$set;
 
 class Globals {
 
-	public int a;
+	public static int a;
 
 	public Globals() {
-		this.a = 3;
+		a = 3;
 	}
 }
 
 public class GlobalsConstructor {
 
 	public void main(String[] args) {
+		@SuppressWarnings("unused")
+		Globals g = new Globals();
+		
 		new Globals() {
 			{
 				$set(this, "b", 6);
@@ -37,4 +40,8 @@ public class GlobalsConstructor {
 		};
 	}
 
+}
+
+class Invalid extends Globals {
+	
 }

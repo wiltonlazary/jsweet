@@ -16,211 +16,246 @@
  */
 package org.jsweet.test.transpiler;
 
-import static org.jsweet.transpiler.JSweetProblem.GLOBAL_CANNOT_BE_INSTANTIATED;
-import static org.jsweet.transpiler.JSweetProblem.GLOBAL_CONSTRUCTOR_DEF;
 import static org.jsweet.transpiler.JSweetProblem.GLOBAL_DELETE;
 import static org.jsweet.transpiler.JSweetProblem.GLOBAL_INDEXER_GET;
 import static org.jsweet.transpiler.JSweetProblem.GLOBAL_INDEXER_SET;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 
 import org.jsweet.transpiler.JSweetProblem;
+import org.jsweet.transpiler.ModuleKind;
 import org.junit.Assert;
 import org.junit.Test;
 
 import source.structural.AbstractClass;
+import source.structural.AnonymousClass;
+import source.structural.AnonymousClassForLambda;
 import source.structural.AutoImportClassesInSamePackage;
 import source.structural.AutoImportClassesInSamePackageUsed;
-import source.structural.Enums;
+import source.structural.DefaultMethods;
+import source.structural.DefaultMethodsConsumer;
 import source.structural.ExtendsClassInSameFile;
 import source.structural.ExtendsObject;
+import source.structural.GetClass;
 import source.structural.GlobalsAccess;
 import source.structural.Inheritance;
 import source.structural.InnerClass;
+import source.structural.InnerClassNotStatic;
+import source.structural.InnerClassUse;
+import source.structural.InstanceOf;
+import source.structural.InstanceofForInterfaces;
+import source.structural.InterfaceInheritance;
+import source.structural.JSNI;
 import source.structural.Name;
-import source.structural.NameClashes;
-import source.structural.NoInstanceofForInterfaces;
+import source.structural.NameClashesWithMethodInvocations;
+import source.structural.NoNameClashesWithFields;
 import source.structural.NoWildcardsInImports;
+import source.structural.ObjectTypes;
+import source.structural.StaticMembersInInterfaces;
 import source.structural.TwoClassesInSameFile;
-import source.structural.WrongConstructsInEnums;
 import source.structural.WrongConstructsInInterfaces;
+import source.structural.WrongConstructsInSharedInterfaces;
+import source.structural.WrongThisAccessOnStatic;
 import source.structural.globalclasses.Globals;
+import source.structural.globalclasses.a.ClassWithStaticMethod;
 import source.structural.globalclasses.a.GlobalsConstructor;
-import source.structural.globalclasses.b.GlobalFunctionStaticGetSet;
-import source.structural.globalclasses.c.GlobalFunctionGetSet;
+import source.structural.globalclasses.c.ClassUsingStaticMethod;
+import source.structural.globalclasses.c.GlobalFunctionGetSetDelete;
 import source.structural.globalclasses.d.GlobalFunctionAccessFromMain;
-import source.structural.globalclasses.f.GlobalFunctionStaticDelete;
-import source.structural.globalclasses.g.GlobalFunctionDelete;
+import source.structural.globalclasses.f.InvalidGlobalSetGetDelete;
+import source.structural.other.Wrapping;
 
 public class StructuralTests extends AbstractTest {
 
 	@Test
-	public void testFieldMethodNameClashes() {
+	public void testNoNameClashesWithFields() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals(2, (int) r.get("v1"));
+			assertEquals(2, (int) r.get("v2"));
+			assertEquals(3, (int) r.get("v3"));
+			assertEquals("hello", (String) r.get("v4"));
+			assertEquals("hello", (String) r.get("v5"));
+		}, getSourceFile(NoNameClashesWithFields.class));
+	}
+
+	@Test
+	public void testVariableMethodNameClashes() {
 		transpile(logHandler -> {
-			assertEquals("There should be two problems", 2, logHandler.reportedProblems.size());
-			assertTrue("Missing expected problem: " + JSweetProblem.FIELD_CONFLICTS_METHOD,
-					logHandler.reportedProblems.contains(JSweetProblem.FIELD_CONFLICTS_METHOD));
-			assertTrue("Missing expected problem: " + JSweetProblem.METHOD_CONFLICTS_FIELD,
-					logHandler.reportedProblems.contains(JSweetProblem.METHOD_CONFLICTS_FIELD));
-		} , getSourceFile(NameClashes.class));
+			logHandler.assertReportedProblems(JSweetProblem.HIDDEN_INVOCATION, JSweetProblem.HIDDEN_INVOCATION, JSweetProblem.HIDDEN_INVOCATION);
+		}, getSourceFile(NameClashesWithMethodInvocations.class));
 	}
 
 	@Test
 	public void testTwoClassesInSameFile() {
 		transpile(logHandler -> {
 			assertEquals("There should be 0 problems", 0, logHandler.reportedProblems.size());
-		} , getSourceFile(TwoClassesInSameFile.class));
+		}, getSourceFile(TwoClassesInSameFile.class));
 	}
 
 	@Test
 	public void testExtendsClassInSameFile() {
 		transpile(logHandler -> {
 			assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} , getSourceFile(ExtendsClassInSameFile.class));
+		}, getSourceFile(ExtendsClassInSameFile.class));
 	}
 
 	@Test
 	public void testInnerClass() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals("test1", r.get("value1"));
+			assertEquals("test2", r.get("value2"));
+			assertEquals("test3", r.get("value3"));
+		}, getSourceFile(InnerClass.class));
+	}
+
+	@Test
+	public void testInnerClassUse() {
 		transpile(logHandler -> {
-			assertEquals("There should be 1 problem", 1, logHandler.reportedProblems.size());
-			assertTrue("Missing expected problem: " + JSweetProblem.INNER_CLASS, logHandler.reportedProblems.contains(JSweetProblem.INNER_CLASS));
-		} , getSourceFile(InnerClass.class));
+			logHandler.assertReportedProblems();
+		}, getSourceFile(InnerClass.class), getSourceFile(Wrapping.class), getSourceFile(InnerClassUse.class));
+	}
+
+	@Test
+	public void testInnerClassNotStatic() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals("22abc,22a,22ABC,22a,22b,22c,22ABC,test22a,staticMethod", r.get("trace"));
+		}, getSourceFile(InnerClassNotStatic.class));
+	}
+
+	@Test
+	public void testAnonymousClasses() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals("test,22abcfinal", r.get("trace"));
+		}, getSourceFile(AnonymousClass.class));
+	}
+
+	@Test
+	public void testAnonymousClassForLambda() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+		}, getSourceFile(AnonymousClassForLambda.class));
 	}
 
 	@Test
 	public void testInheritance() {
-		transpile(logHandler -> {
+		eval((logHandler, r) -> {
 			assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} , getSourceFile(Inheritance.class));
+			assertEquals(true, r.<Boolean> get("X"));
+			assertEquals(true, r.<Boolean> get("Y"));
+			assertEquals("s1", r.<Boolean> get("s1b"));
+			assertEquals("s2", r.<Boolean> get("s2b"));
+			assertEquals(false, r.<Boolean> get("itfo"));
+			assertEquals("s1", r.<Boolean> get("s1o"));
+			assertEquals("s2", r.<Boolean> get("s2o"));
+		}, getSourceFile(Inheritance.class));
 	}
 
 	@Test
 	public void testWrongConstructsInInterfaces() {
 		transpile(logHandler -> {
-			assertEquals("There should be 11 errors", 11, logHandler.reportedProblems.size());
-			assertEquals("Wrong error type", JSweetProblem.INTERFACE_MUST_BE_ABSTRACT, logHandler.reportedProblems.get(0));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_FIELD_INITIALIZER_IN_INTERFACE, logHandler.reportedProblems.get(1));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_STATIC_IN_INTERFACE, logHandler.reportedProblems.get(2));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_PRIVATE_IN_INTERFACE, logHandler.reportedProblems.get(3));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, logHandler.reportedProblems.get(4));
-			assertEquals("Wrong error type", JSweetProblem.NATIVE_MODIFIER_IS_NOT_ALLOWED, logHandler.reportedProblems.get(5));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, logHandler.reportedProblems.get(6));
-			assertEquals("Wrong error type", JSweetProblem.NATIVE_MODIFIER_IS_NOT_ALLOWED, logHandler.reportedProblems.get(7));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_STATIC_IN_INTERFACE, logHandler.reportedProblems.get(8));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_INITIALIZER_IN_INTERFACE, logHandler.reportedProblems.get(9));
-			assertEquals("Wrong error type", JSweetProblem.INVALID_INITIALIZER_IN_INTERFACE, logHandler.reportedProblems.get(10));
-		} , getSourceFile(WrongConstructsInInterfaces.class));
+			logHandler.assertReportedProblems( //
+					JSweetProblem.INVALID_FIELD_INITIALIZER_IN_INTERFACE, //
+					// JSweetProblem.INVALID_STATIC_IN_INTERFACE, //
+					JSweetProblem.INVALID_PRIVATE_IN_INTERFACE, //
+					JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, //
+					JSweetProblem.INVALID_METHOD_BODY_IN_INTERFACE, //
+					// JSweetProblem.INVALID_STATIC_IN_INTERFACE, //
+					JSweetProblem.INVALID_INITIALIZER_IN_INTERFACE, //
+					JSweetProblem.INVALID_INITIALIZER_IN_INTERFACE);
+		}, getSourceFile(WrongConstructsInInterfaces.class));
 	}
 
 	@Test
-	public void testWrongConstructsInEnums() {
+	public void testWrongConstructsInSharedInterfaces() {
 		transpile(logHandler -> {
-			logHandler.assertReportedProblems(JSweetProblem.INVALID_FIELD_IN_ENUM, JSweetProblem.INVALID_FIELD_IN_ENUM, JSweetProblem.INVALID_FIELD_IN_ENUM,
-					JSweetProblem.INVALID_CONSTRUCTOR_IN_ENUM, JSweetProblem.INVALID_METHOD_IN_ENUM, JSweetProblem.INVALID_METHOD_IN_ENUM,
-					JSweetProblem.INVALID_METHOD_IN_ENUM);
-		} , getSourceFile(WrongConstructsInEnums.class));
+			logHandler.assertReportedProblems();
+		}, getSourceFile(WrongConstructsInSharedInterfaces.class));
 	}
 
 	@Test
 	public void testAbstractClass() {
 		transpile(logHandler -> {
 			assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} , getSourceFile(AbstractClass.class));
+		}, getSourceFile(AbstractClass.class));
 	}
 
 	@Test
 	public void testExtendsObject() {
 		transpile(logHandler -> {
 			assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} , getSourceFile(ExtendsObject.class));
+		}, getSourceFile(ExtendsObject.class));
 	}
 
 	@Test
-	public void testNoInstanceofForInterfaces() {
+	public void testInterfaceInheritance() {
 		transpile(logHandler -> {
-			assertEquals("There should be 2 problems", 2, logHandler.reportedProblems.size());
-			assertEquals("Missing expected problem: " + JSweetProblem.INVALID_INSTANCEOF_INTERFACE, JSweetProblem.INVALID_INSTANCEOF_INTERFACE,
-					logHandler.reportedProblems.get(0));
-			assertEquals("Missing expected problem: " + JSweetProblem.INVALID_INSTANCEOF_INTERFACE, JSweetProblem.INVALID_INSTANCEOF_INTERFACE,
-					logHandler.reportedProblems.get(1));
-		} , getSourceFile(NoInstanceofForInterfaces.class));
-	}
-
-	@Test
-	public void testEnums() {
-		eval((logHandler, r) -> {
 			assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-			Assert.assertEquals("Wrong enum behavior", 0, ((Number) r.get("value")).intValue());
-			Assert.assertEquals("Wrong enum behavior", "A", r.get("nameOfA"));
-			Assert.assertEquals("Wrong enum behavior", 0, ((Number) r.get("ordinalOfA")).intValue());
-			Assert.assertEquals("Wrong enum behavior", 0, ((Number) r.get("valueOfA")).intValue());
-			Assert.assertEquals("Wrong enum behavior", 2, ((Number) r.get("valueOfC")).intValue());
-		} , getSourceFile(Enums.class));
+		}, getSourceFile(InterfaceInheritance.class));
+	}
+	
+	@Test
+	public void testInstanceofForInterfaces() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			Assert.assertEquals("1,2,1,3,4,5,6", r.get("trace"));
+		}, getSourceFile(InstanceofForInterfaces.class));
 	}
 
 	@Test
 	public void testNoConstructorInGlobalsClass() {
 		transpile(logHandler -> {
 			logHandler.assertReportedProblems(//
-					GLOBAL_CONSTRUCTOR_DEF, //
-					GLOBAL_CANNOT_BE_INSTANTIATED);
-		} , getSourceFile(GlobalsConstructor.class));
+					JSweetProblem.GLOBAL_CONSTRUCTOR_DEF, //
+					JSweetProblem.GLOBAL_CANNOT_BE_INSTANTIATED, //
+					JSweetProblem.GLOBAL_CANNOT_BE_INSTANTIATED, //
+					JSweetProblem.GLOBALS_CLASS_CANNOT_BE_SUBCLASSED);
+		}, getSourceFile(GlobalsConstructor.class));
 	}
 
 	@Test
 	public void testNoGetSetInGlobalFunction() {
 		transpile(logHandler -> {
-			logHandler.assertReportedProblems(GLOBAL_INDEXER_GET, GLOBAL_INDEXER_SET, GLOBAL_INDEXER_GET, GLOBAL_INDEXER_SET);
-		} , getSourceFile(GlobalFunctionGetSet.class));
-	}
-
-	@Test
-	public void testNoStaticGetSetInGlobalFunction() {
-		transpile(logHandler -> {
-			logHandler.assertReportedProblems(GLOBAL_INDEXER_GET, GLOBAL_INDEXER_SET);
-		} , getSourceFile(GlobalFunctionStaticGetSet.class));
+			logHandler.assertReportedProblems();
+		}, getSourceFile(GlobalFunctionGetSetDelete.class));
 	}
 
 	@Test
 	public void testNoStaticDeleteInGlobalFunction() {
 		transpile(logHandler -> {
-			logHandler.assertReportedProblems(GLOBAL_DELETE);
-		} , getSourceFile(GlobalFunctionStaticDelete.class));
-	}
-
-	@Test
-	public void testNoDeleteInGlobalFunction() {
-		transpile(logHandler -> {
-			logHandler.assertReportedProblems(GLOBAL_DELETE);
-		} , getSourceFile(GlobalFunctionDelete.class));
+			logHandler.assertReportedProblems(GLOBAL_INDEXER_GET, GLOBAL_INDEXER_SET, GLOBAL_DELETE);
+		}, getSourceFile(InvalidGlobalSetGetDelete.class));
 	}
 
 	@Test
 	public void testGlobalFunctionAccessFromMain() {
-		eval((logHandler, r) -> {
+		// TODO: make it work with modules
+		eval(ModuleKind.none, (logHandler, r) -> {
 			assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
 			Assert.assertEquals(true, r.get("mainInvoked"));
 			Assert.assertEquals("invoked", r.get("test"));
-			Assert.assertEquals("invoked1_2", r.get("Static"));
+			// Assert.assertEquals("invoked1_2", r.get("Static"));
+			Assert.assertEquals("invoked1_2", r.get("Ok"));
 			Assert.assertEquals("invoked1_2", r.get("test2"));
-		} , getSourceFile(Globals.class), getSourceFile(source.structural.globalclasses.e.Globals.class),
-				getSourceFile(GlobalFunctionAccessFromMain.class));
+		}, getSourceFile(Globals.class), getSourceFile(source.structural.globalclasses.e.Globals.class), getSourceFile(GlobalFunctionAccessFromMain.class));
 	}
 
 	@Test
 	public void testWildcardsInImports() {
 		transpile((logHandler) -> {
 			logHandler.assertReportedProblems(JSweetProblem.WILDCARD_IMPORT);
-		} , getSourceFile(NoWildcardsInImports.class));
+		}, getSourceFile(NoWildcardsInImports.class));
 	}
 
 	@Test
 	public void testName() {
 		transpile((logHandler) -> {
 			logHandler.assertReportedProblems();
-		} , getSourceFile(Name.class));
+		}, getSourceFile(Name.class));
 	}
-	
+
 	@Test
 	public void testAutoImportClassesInSamePackage() {
 		eval((logHandler, r) -> {
@@ -229,7 +264,7 @@ public class StructuralTests extends AbstractTest {
 			Assert.assertEquals("A method was not executed as expected", true, r.get("m2"));
 			Assert.assertEquals("A method was not executed as expected", true, r.get("sm1"));
 			Assert.assertEquals("A method was not executed as expected", true, r.get("sm2"));
-		} , getSourceFile(AutoImportClassesInSamePackageUsed.class), getSourceFile(AutoImportClassesInSamePackage.class));
+		}, getSourceFile(AutoImportClassesInSamePackageUsed.class), getSourceFile(AutoImportClassesInSamePackage.class));
 	}
 
 	@Test
@@ -237,7 +272,91 @@ public class StructuralTests extends AbstractTest {
 		eval((logHandler, r) -> {
 			assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
 			Assert.assertEquals("Renaud Pawlak", r.get("result"));
-		} , getSourceFile(GlobalsAccess.class));
+		}, getSourceFile(GlobalsAccess.class));
+	}
+
+	@Test
+	public void testWrongGlobals() {
+		transpile(logHandler -> {
+			logHandler.assertReportedProblems(JSweetProblem.GLOBALS_CLASS_CANNOT_HAVE_SUPERCLASS, JSweetProblem.GLOBAL_CONSTRUCTOR_DEF,
+					JSweetProblem.GLOBALS_CAN_ONLY_HAVE_STATIC_MEMBERS, JSweetProblem.GLOBALS_CAN_ONLY_HAVE_STATIC_MEMBERS);
+		}, getSourceFile(source.structural.wrongglobals.Globals.class));
+	}
+
+	@Test
+	public void testObjectTypes() {
+		transpile(logHandler -> {
+			logHandler.assertReportedProblems();
+		}, getSourceFile(ObjectTypes.class));
+	}
+
+	@Test
+	public void testWrongThisAccessOnStatic() {
+		transpile(ModuleKind.none, logHandler -> {
+			logHandler.assertReportedProblems(JSweetProblem.CANNOT_ACCESS_STATIC_MEMBER_ON_THIS, JSweetProblem.CANNOT_ACCESS_STATIC_MEMBER_ON_THIS);
+		}, getSourceFile(WrongThisAccessOnStatic.class));
+	}
+
+	@Test
+	public void testInstanceOf() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+		}, getSourceFile(InstanceOf.class));
+	}
+
+	@Test
+	public void testJSNI() {
+		transpile(ModuleKind.none, logHandler -> {
+			logHandler.assertReportedProblems();
+		}, getSourceFile(JSNI.class));
+	}
+
+	@Test
+	public void testDefaultMethods() {
+		// TODO: make it work with modules
+		eval(ModuleKind.none, (logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals("m,m1,m2-overriden", r.get("trace"));
+		}, getSourceFile(ClassWithStaticMethod.class), getSourceFile(DefaultMethods.class), getSourceFile(DefaultMethodsConsumer.class));
+	}
+
+	@Test
+	public void testStaticMembersInInterfaces() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals("test1", r.get("value1"));
+			assertEquals("test2", r.get("value2"));
+			assertEquals("test3", r.get("value3"));
+			assertEquals("test4", r.get("value4"));
+		}, getSourceFile(StaticMembersInInterfaces.class));
+	}
+
+	@Test
+	public void testStaticImport() {
+		// TODO: support with modules
+		eval(ModuleKind.none, (logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals(true, r.get("m"));
+		}, getSourceFile(ClassWithStaticMethod.class), getSourceFile(ClassUsingStaticMethod.class));
+	}
+
+	@Test
+	public void testGetClass() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			assertEquals("source.structural.AClass1", r.get("name1"));
+			assertEquals("source.structural.AClass1", r.get("name2"));
+			assertEquals("source.structural.AClass1", r.get("name3"));
+			assertEquals("source.structural.Functions", r.get("name4"));
+			assertEquals("source.structural.Functions", r.get("name5"));
+			assertEquals("AClass1", r.get("simplename1"));
+			assertEquals("AClass1", r.get("simplename2"));
+			assertEquals("AClass1", r.get("simplename3"));
+			assertEquals("Functions", r.get("simplename4"));
+			assertEquals("Functions", r.get("simplename5"));
+			assertEquals("String", r.get("string"));
+			assertEquals("Number", r.get("number"));
+		}, getSourceFile(GetClass.class));
 	}
 
 }

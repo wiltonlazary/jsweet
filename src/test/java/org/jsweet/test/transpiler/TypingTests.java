@@ -19,6 +19,7 @@ package org.jsweet.test.transpiler;
 import static org.junit.Assert.fail;
 
 import org.jsweet.transpiler.JSweetProblem;
+import org.jsweet.transpiler.ModuleKind;
 import org.jsweet.transpiler.util.EvaluationResult;
 import org.junit.Assert;
 import org.junit.Test;
@@ -26,6 +27,8 @@ import org.junit.Test;
 import source.typing.ArraysOfLambdas;
 import source.typing.ClassTypeAsFunction;
 import source.typing.ClassTypeAsTypeOf;
+import source.typing.CustomLambdas;
+import source.typing.CustomStringTypes;
 import source.typing.InvalidIndexedAccesses;
 import source.typing.Lambdas;
 import source.typing.Numbers;
@@ -39,144 +42,105 @@ public class TypingTests extends AbstractTest {
 
 	@Test
 	public void testNumbers() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(Numbers.class));
+		transpile(ModuleKind.none, logHandler -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(Numbers.class));
 	}
 
 	@Test
 	public void testLambdas() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			EvaluationResult r = transpiler.eval(logHandler, getSourceFile(Lambdas.class));
+		eval(ModuleKind.none, (logHandler, r) -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
 			Assert.assertEquals("a", r.get("result"));
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(Lambdas.class));
 	}
 
 	@Test
 	public void testVoidType() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(VoidType.class));
+		transpile(ModuleKind.none, logHandler -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(VoidType.class));
 	}
 
 	@Test
 	public void testClassTypeAsTypeOf() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(ClassTypeAsTypeOf.class));
+		transpile(ModuleKind.none, logHandler -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(ClassTypeAsTypeOf.class));
 	}
 
 	@Test
 	public void testClassTypeAsFunction() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(ClassTypeAsFunction.class));
+		transpile(ModuleKind.none, logHandler -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(ClassTypeAsFunction.class));
 	}
 
 	@Test
 	public void testArraysOfLambdas() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(ArraysOfLambdas.class));
+		transpile(ModuleKind.none, logHandler -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(ArraysOfLambdas.class));
 	}
 
 	@Test
 	public void testStringTypesUsage() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(StringTypesUsage.class));
+		transpile(ModuleKind.none, logHandler -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(StringTypesUsage.class));
+	}
+
+	@Test
+	public void testCustomStringTypes() {
+		transpile(ModuleKind.none, logHandler -> {
+			logHandler.assertReportedProblems();
+		}, getSourceFile(CustomStringTypes.class));
 	}
 
 	@Test
 	public void testTuples() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			EvaluationResult r = transpiler.eval(logHandler, getSourceFile(Tuples.class));
+		eval(ModuleKind.none, (logHandler, r) -> {
+			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
 			Assert.assertEquals("test", r.get("0_init"));
 			Assert.assertEquals(10, r.<Number> get("1_init").intValue());
 			Assert.assertEquals("ok", r.get("0_end"));
 			Assert.assertEquals(9, r.<Number> get("1_end").intValue());
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(Tuples.class));
 	}
 
 	@Test
 	public void testUnions() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			EvaluationResult r = transpiler.eval(logHandler, getSourceFile(Unions.class));
+		eval(ModuleKind.none, (logHandler, r) -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
 			Assert.assertEquals("test", r.get("union"));
 			Assert.assertEquals("test", r.get("s"));
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(Unions.class));
 	}
 
 	@Test
 	public void testWrongUnions() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(WrongUnions.class));
-			Assert.assertEquals("Wrong number of errors", 6, logHandler.reportedProblems.size());
+		transpile(ModuleKind.none, logHandler -> {
 			logHandler.assertReportedProblems(JSweetProblem.UNION_TYPE_MISMATCH, JSweetProblem.UNION_TYPE_MISMATCH, JSweetProblem.UNION_TYPE_MISMATCH,
-					JSweetProblem.UNION_TYPE_MISMATCH, JSweetProblem.UNION_TYPE_MISMATCH, JSweetProblem.UNION_TYPE_MISMATCH);
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+					JSweetProblem.UNION_TYPE_MISMATCH, JSweetProblem.UNION_TYPE_MISMATCH, JSweetProblem.UNION_TYPE_MISMATCH, JSweetProblem.UNION_TYPE_MISMATCH,
+					JSweetProblem.UNION_TYPE_MISMATCH);
+		}, getSourceFile(WrongUnions.class));
 	}
 
 	@Test
 	public void testInvalidIndexedAccesses() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(InvalidIndexedAccesses.class));
+		transpile(ModuleKind.none, logHandler -> {
 			Assert.assertEquals("There should be one error", 1, logHandler.reportedProblems.size());
 			Assert.assertEquals("Wrong type of expected error", JSweetProblem.INDEXED_SET_TYPE_MISMATCH, logHandler.reportedProblems.get(0));
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(InvalidIndexedAccesses.class));
+	}
+
+	@Test
+	public void testCustomLambdas() {
+		eval((logHandler, r) -> {
+			logHandler.assertReportedProblems();
+			Assert.assertEquals("test1", r.get("lambda"));
+		}, getSourceFile(CustomLambdas.class));
 	}
 
 }

@@ -17,12 +17,21 @@
 package org.jsweet.transpiler.candies;
 
 import java.io.IOException;
+import java.util.Enumeration;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
 
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 
 /**
  * A candy descriptor for the candies store.
@@ -30,16 +39,36 @@ import org.apache.commons.io.IOUtils;
  * @see CandiesStore
  */
 class CandyDescriptor {
-	String name;
-	String version;
-	long lastUpdateTimestamp;
-	String modelVersion;
+	final String name;
+	final String version;
+	final long lastUpdateTimestamp;
+	final String modelVersion;
+	final String transpilerVersion;
+	final String jsOutputDirPath;
+	final String jsDirPath;
+	final List<String> jsFilesPaths;
 
-	public CandyDescriptor(String name, String version, long lastUpdateTimestamp, String modelVersion) {
+	public CandyDescriptor( //
+			String name, //
+			String version, //
+			long lastUpdateTimestamp, //
+			String modelVersion, //
+			String transpilerVersion, //
+			String jsOutputDirPath, //
+			String jsDirPath, //
+			List<String> jsFilesPaths) {
 		this.name = name;
 		this.version = version;
 		this.lastUpdateTimestamp = lastUpdateTimestamp;
 		this.modelVersion = modelVersion;
+		this.transpilerVersion = transpilerVersion;
+		this.jsOutputDirPath = jsOutputDirPath;
+		this.jsDirPath = jsDirPath;
+		this.jsFilesPaths = jsFilesPaths;
+	}
+
+	public boolean hasJsFiles() {
+		return jsFilesPaths.size() > 0;
 	}
 
 	@Override
@@ -56,22 +85,31 @@ class CandyDescriptor {
 		CandyDescriptor other = (CandyDescriptor) obj;
 		return name.equals(other.name) //
 				&& version.equals(other.version) //
-				&& lastUpdateTimestamp == other.lastUpdateTimestamp;
+				&& lastUpdateTimestamp == other.lastUpdateTimestamp //
+				&& StringUtils.equals(jsOutputDirPath, other.jsOutputDirPath);
 	}
 
 	private final static Pattern MODEL_VERSION_PATTERN = Pattern.compile("[\\<]groupId[\\>]org[.]jsweet[.]candies[.](.*)[\\<]/groupId[\\>]");
 	private final static Pattern ARTIFACT_ID_PATTERN = Pattern.compile("[\\<]artifactId[\\>](.*)[\\<]/artifactId[\\>]");
 	private final static Pattern VERSION_PATTERN = Pattern.compile("[\\<]version[\\>](.*)[\\<]/version[\\>]");
 
-	public static CandyDescriptor fromCandyJar(JarFile jarFile) throws IOException {
-		JarEntry pomEntry = jarFile.stream() //
-				.filter(e -> e.getName().endsWith("pom.xml")) //
-				.findFirst().get();
+	private final static Gson gson = new GsonBuilder().setPrettyPrinting().create();
+
+	public static CandyDescriptor fromCandyJar(JarFile jarFile, String jsOutputDirPath) throws IOException {
+		JarEntry pomEntry = null;
+		Enumeration<JarEntry> entries = jarFile.entries();
+		while (entries.hasMoreElements()) {
+			JarEntry current = entries.nextElement();
+			if (current.getName().endsWith("pom.xml")) {
+				pomEntry = current;
+			}
+		}
 
 		String pomContent = IOUtils.toString(jarFile.getInputStream(pomEntry));
 
 		// take only general part
-		String pomGeneralPart = pomContent.substring(0, pomContent.indexOf("<dependencies>"));
+		int dependenciesIndex = pomContent.indexOf("<dependencies>");
+		String pomGeneralPart = dependenciesIndex > 0 ? pomContent.substring(0, dependenciesIndex) : pomContent;
 
 		// extract candy model version from <groupId></groupId>
 		Matcher matcher = MODEL_VERSION_PATTERN.matcher(pomGeneralPart);
@@ -95,7 +133,38 @@ class CandyDescriptor {
 
 		long lastUpdateTimestamp = jarFile.getEntry("META-INF/MANIFEST.MF").getTime();
 
-		return new CandyDescriptor(name, version, lastUpdateTimestamp, modelVersion);
+		String transpilerVersion = null;
+
+		ZipEntry metadataEntry = jarFile.getEntry("META-INF/candy-metadata.json");
+		if (metadataEntry != null) {
+			String metadataContent = IOUtils.toString(jarFile.getInputStream(metadataEntry));
+
+			@SuppressWarnings("unchecked")
+			Map<String, ?> metadata = gson.fromJson(metadataContent, Map.class);
+
+			transpilerVersion = (String) metadata.get("transpilerVersion");
+		}
+
+		String jsDirPath = "META-INF/resources/webjars/" + name + "/" + version;
+		ZipEntry jsDirEntry = jarFile.getEntry(jsDirPath);
+		List<String> jsFilesPaths = new LinkedList<>();
+		if (jsDirEntry != null) {
+			// collects js files
+			jarFile.stream() //
+					.filter(entry -> entry.getName().startsWith(jsDirPath) && entry.getName().endsWith(".js")) //
+					.map(entry -> entry.getName()) //
+					.forEach(jsFilesPaths::add);
+		}
+
+		return new CandyDescriptor( //
+				name, //
+				version, //
+				lastUpdateTimestamp, //
+				modelVersion, //
+				transpilerVersion, //
+				jsOutputDirPath, //
+				jsDirPath, //
+				jsFilesPaths);
 	}
 
 	@Override

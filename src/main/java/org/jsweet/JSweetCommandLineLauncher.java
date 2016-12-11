@@ -64,11 +64,11 @@ public class JSweetCommandLineLauncher {
 				printUsage(jsapSpec);
 				System.exit(-1);
 			}
-			
+
 			if (jsapArgs.getBoolean("help")) {
 				printUsage(jsapSpec);
 			}
-			
+
 			if (jsapArgs.getBoolean("verbose")) {
 				LogManager.getLogger("org.jsweet").setLevel(Level.ALL);
 			}
@@ -78,26 +78,37 @@ public class JSweetCommandLineLauncher {
 			String classPath = jsapArgs.getString("classpath");
 			logger.info("classpath: " + classPath);
 
-			File tsOutputDir = jsapArgs.getFile("tsout");
-			tsOutputDir.mkdirs();
-			logger.info("ts output dir: " + tsOutputDir);
-
-			File jsOutputDir = null;
-			if (jsapArgs.getFile("jsout") != null) {
-				jsOutputDir = jsapArgs.getFile("jsout");
-				jsOutputDir.mkdirs();
-			}
-			logger.info("js output dir: " + jsOutputDir);
-
-			File inputDir = new File(jsapArgs.getString("input"));
-			logger.info("input dir: " + inputDir);
-
-			LinkedList<File> files = new LinkedList<File>();
-			Util.addFiles(".java", inputDir, files);
-
 			ErrorCountTranspilationHandler transpilationHandler = new ErrorCountTranspilationHandler(new ConsoleTranspilationHandler());
+
 			try {
-				JSweetTranspiler transpiler = new JSweetTranspiler(tsOutputDir, jsOutputDir, classPath);
+				File tsOutputDir = jsapArgs.getFile("tsout");
+				tsOutputDir.mkdirs();
+				logger.info("ts output dir: " + tsOutputDir);
+
+				File jsOutputDir = null;
+				if (jsapArgs.getFile("jsout") != null) {
+					jsOutputDir = jsapArgs.getFile("jsout");
+					jsOutputDir.mkdirs();
+				}
+				logger.info("js output dir: " + jsOutputDir);
+
+				File dtsOutputDir = null;
+				if (jsapArgs.getFile("dtsout") != null) {
+					dtsOutputDir = jsapArgs.getFile("dtsout");
+				}
+
+				File candiesJsOutputDir = null;
+				if (jsapArgs.getFile("candiesJsOut") != null) {
+					candiesJsOutputDir = jsapArgs.getFile("candiesJsOut");
+				}
+
+				File inputDir = new File(jsapArgs.getString("input"));
+				logger.info("input dir: " + inputDir);
+
+				LinkedList<File> files = new LinkedList<File>();
+				Util.addFiles(".java", inputDir, files);
+
+				JSweetTranspiler transpiler = new JSweetTranspiler(tsOutputDir, jsOutputDir, candiesJsOutputDir, classPath);
 
 				transpiler.setBundle(jsapArgs.getBoolean("bundle"));
 				transpiler.setNoRootDirectories(jsapArgs.getBoolean("noRootDirectories"));
@@ -112,6 +123,13 @@ public class JSweetCommandLineLauncher {
 				transpiler.setModuleKind(ModuleKind.valueOf(jsapArgs.getString("module")));
 				transpiler.setEncoding(jsapArgs.getString("encoding"));
 				transpiler.setIgnoreAssertions(jsapArgs.getBoolean("ignoreAssertions"));
+				transpiler.setGenerateDeclarations(jsapArgs.getBoolean("declaration"));
+				transpiler.setGenerateJsFiles(!jsapArgs.getBoolean("tsOnly"));
+				transpiler.setInterfaceTracking(!jsapArgs.getBoolean("disableJavaAddons"));
+				transpiler.setSupportGetClass(!jsapArgs.getBoolean("disableJavaAddons"));
+				transpiler.setSupportSaticLazyInitialization(!jsapArgs.getBoolean("disableJavaAddons"));
+				transpiler.setGenerateDefinitions(jsapArgs.getBoolean("definitions"));
+				transpiler.setDeclarationsOutputDir(dtsOutputDir);
 
 				transpiler.transpile(transpilationHandler, SourceFile.toSourceFiles(files));
 			} catch (NoClassDefFoundError error) {
@@ -210,6 +228,50 @@ public class JSweetCommandLineLauncher {
 		optionArg.setRequired(false);
 		jsap.registerParameter(optionArg);
 
+		// Do not generate JavaScript
+		switchArg = new Switch("tsOnly");
+		switchArg.setLongFlag("tsOnly");
+		switchArg.setHelp("Tells the transpiler to not compile the TypeScript output (let an external TypeScript compiler do so).");
+		jsap.registerParameter(switchArg);
+
+		// Do not generate JavaScript
+		switchArg = new Switch("disableJavaAddons");
+		switchArg.setLongFlag("disableJavaAddons");
+		switchArg.setHelp(
+				"Tells the transpiler disable runtime addons (instanceof, overloading, class name access, static initialization [...] will not be fully supported).");
+		jsap.registerParameter(switchArg);
+
+		// Do not generate JavaScript
+		switchArg = new Switch("definitions");
+		switchArg.setLongFlag("definitions");
+		switchArg.setHelp(
+				"Tells the transpiler to generate definitions from def.* packages in d.ts definition files. The output directory is given by the tsout option. This option can be used to create candies for existing JavaScript libraries and must not be confused with the 'declaration' option, that generates the definitions along with a program written in JSweet.");
+		jsap.registerParameter(switchArg);
+
+		// Generates declarations
+		switchArg = new Switch("declaration");
+		switchArg.setLongFlag("declaration");
+		switchArg.setHelp("Tells the transpiler to generate the d.ts files along with the js files, so that other programs can use them to compile.");
+		jsap.registerParameter(switchArg);
+
+		// Declarations output directory
+		optionArg = new FlaggedOption("dtsout");
+		optionArg.setLongFlag("dtsout");
+		optionArg.setHelp(
+				"Specify where to place generated d.ts files when the declaration option is set (by default, d.ts files are generated in the JavaScript output directory - next to the corresponding js files).");
+		optionArg.setStringParser(FileStringParser.getParser());
+		optionArg.setRequired(false);
+		jsap.registerParameter(optionArg);
+
+		// Candies javascript output directory
+		optionArg = new FlaggedOption("candiesJsOut");
+		optionArg.setLongFlag("candiesJsOut");
+		optionArg.setDefault("js/candies");
+		optionArg.setHelp("Specify where to place extracted JavaScript files from candies.");
+		optionArg.setStringParser(FileStringParser.getParser());
+		optionArg.setRequired(false);
+		jsap.registerParameter(optionArg);
+
 		// Classpath
 		optionArg = new FlaggedOption("classpath");
 		optionArg.setLongFlag("classpath");
@@ -256,11 +318,10 @@ public class JSweetCommandLineLauncher {
 		// Ignore assertions
 		switchArg = new Switch("ignoreAssertions");
 		switchArg.setLongFlag("ignoreAssertions");
-		switchArg.setHelp(
-				"Set the transpiler to ignore 'assert' statements, i.e. no code is generated for assertions.");
+		switchArg.setHelp("Set the transpiler to ignore 'assert' statements, i.e. no code is generated for assertions.");
 		switchArg.setDefault("false");
 		jsap.registerParameter(switchArg);
-		
+
 		return jsap;
 	}
 

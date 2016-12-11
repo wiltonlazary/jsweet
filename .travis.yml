@@ -1,0 +1,24 @@
+language: java
+
+sudo: false
+
+jdk:
+  - oraclejdk8
+
+script:
+  - mvn clean verify
+
+cache:
+  directories:
+    - $HOME/.m2
+
+install:
+  - nvm install 4.1 && nvm use 4.1
+
+notifications:
+  email:
+    recipients:
+      - renaud.pawlak@gmail.com
+      - louis.grignon@gmail.com
+    on_success: change # default: change
+    on_failure: always # default: always

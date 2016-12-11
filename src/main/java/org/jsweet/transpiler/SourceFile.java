@@ -22,6 +22,8 @@ import java.io.File;
 import java.util.Collection;
 import java.util.LinkedList;
 
+import org.jsweet.transpiler.util.SourceMap;
+
 /**
  * A source file represents a Java source file and holds information on the
  * transpiled output files (Typescript and Javascript files).
@@ -147,9 +149,24 @@ public class SourceFile {
 	File jsMapFile;
 
 	/**
+	 * The Java source directory.
+	 */
+	File javaSourceDir;
+
+	/**
+	 * The Java file relatively to the source directory.
+	 */
+	File javaSourceDirRelativeFile;
+
+	/**
 	 * Internally used by {@link JSweetTranspiler}.
 	 */
 	long jsFileLastTranspiled = 0;
+
+	/**
+	 * Internally used by {@link JSweetTranspiler}.
+	 */
+	SourceMap sourceMap;
 
 	/**
 	 * Creates a source file from a file.

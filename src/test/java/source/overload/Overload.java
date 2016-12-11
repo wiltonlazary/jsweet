@@ -17,9 +17,19 @@
 package source.overload;
 
 import static jsweet.util.Globals.$export;
+import static jsweet.util.Globals.string;
+
+import jsweet.lang.Date;
 
 public class Overload {
 
+	public Overload() {
+		this(null);
+	}
+	
+	public Overload(String s) {
+	}
+	
 	String m() {
 		return this.m("default");
 	}
@@ -28,7 +38,7 @@ public class Overload {
 		return this.m(s, 1);
 	}
 
-	String m(String s, int i) {
+	private String m(String s, int i) {
 		return s + i;
 	}
 
@@ -39,4 +49,41 @@ public class Overload {
 		$export("res3", o.m("s2", 2));
 	}
 
+	final static String DATE_FORMAT = ""; 
+	
+	public static String formatDate(Date date) {
+        return formatDate(date, DATE_FORMAT);
+    }
+
+    public static String formatDate(Date date, String format) {
+        if (!Overload.isDate(date)) {
+            return "";
+        }
+        jsweet.lang.String dateFormatted = string(format);
+
+        dateFormatted = string(dateFormatted.replace("yyyy", formatNumber(date.getFullYear(), 4)));
+        dateFormatted = string(dateFormatted.replace("MM", formatNumber(date.getMonth() + 1, 2)));
+        dateFormatted = string(dateFormatted.replace("dd", formatNumber(date.getDate(), 2)));
+        dateFormatted = string(dateFormatted.replace("hh", formatNumber(date.getHours(), 2)));
+        dateFormatted = string(dateFormatted.replace("mm", formatNumber(date.getMinutes(), 2)));
+        dateFormatted = string(dateFormatted.replace("ss", formatNumber(date.getSeconds(), 2)));
+        dateFormatted = string(dateFormatted.replace("SSS", formatNumber(date.getMilliseconds(), 3)));
+
+        return string(dateFormatted);
+    }
+	
+    public static String formatNumber(double n, int i) {
+    	return "";
+    }
+	
+    public static boolean isDate(Date date) {
+    	return false;
+    }
+    
+}
+
+class OverloadCaller {
+	public static void main(String[] args) {
+		new Overload().m("a");
+	}
 }

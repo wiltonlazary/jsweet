@@ -20,6 +20,7 @@ import org.jsweet.transpiler.JSweetProblem;
 import org.jsweet.transpiler.JSweetTranspiler;
 import org.jsweet.transpiler.Severity;
 import org.jsweet.transpiler.SourceFile;
+import org.jsweet.transpiler.SourcePosition;
 import org.jsweet.transpiler.TranspilationHandler;
 
 /**
@@ -57,8 +58,4 @@ public class ConsoleTranspilationHandler implements TranspilationHandler {
 	public void onCompleted(JSweetTranspiler transpiler, boolean fullPass, SourceFile[] files) {
 	}
 	
-	@Override
-	public void reportSilentError() {
-	}
-
 }

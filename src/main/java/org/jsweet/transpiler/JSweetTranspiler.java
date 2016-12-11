@@ -21,11 +21,13 @@ import static java.util.stream.Collectors.toList;
 import static org.jsweet.transpiler.util.Util.toJavaFileObjects;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.io.Writer;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -35,10 +37,10 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import javax.tools.Diagnostic.Kind;
 import javax.tools.JavaFileManager;
@@ -49,20 +51,22 @@ import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 import org.jsweet.JSweetConfig;
-import org.jsweet.transpiler.TranspilationHandler.SourcePosition;
 import org.jsweet.transpiler.candies.CandiesProcessor;
 import org.jsweet.transpiler.typescript.Java2TypeScriptTranslator;
 import org.jsweet.transpiler.util.AbstractTreePrinter;
+import org.jsweet.transpiler.util.DirectedGraph;
+import org.jsweet.transpiler.util.DirectedGraph.Node;
 import org.jsweet.transpiler.util.ErrorCountTranspilationHandler;
 import org.jsweet.transpiler.util.EvaluationResult;
+import org.jsweet.transpiler.util.Position;
 import org.jsweet.transpiler.util.ProcessUtil;
 import org.jsweet.transpiler.util.Util;
 
 import com.sun.tools.javac.code.Symbol.MethodSymbol;
-import com.sun.tools.javac.code.Symbol.PackageSymbol;
 import com.sun.tools.javac.file.JavacFileManager;
 import com.sun.tools.javac.main.JavaCompiler;
 import com.sun.tools.javac.main.Option;
+import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCCompilationUnit;
 import com.sun.tools.javac.tree.JCTree.JCMethodDecl;
 import com.sun.tools.javac.tree.TreeScanner;
@@ -71,7 +75,6 @@ import com.sun.tools.javac.util.JCDiagnostic;
 import com.sun.tools.javac.util.JavacMessages;
 import com.sun.tools.javac.util.List;
 import com.sun.tools.javac.util.Log;
-import com.sun.tools.javac.util.Log.WriterKind;
 import com.sun.tools.javac.util.Options;
 
 /**
@@ -82,7 +85,14 @@ import com.sun.tools.javac.util.Options;
  * 
  * @author Renaud Pawlak
  */
-public class JSweetTranspiler {
+public class JSweetTranspiler implements JSweetOptions {
+
+	/**
+	 * The TypeScript version to be installed/used with this version of JSweet
+	 * (WARNING: so far, having multiple JSweet versions for the same user
+	 * account may lead to performance issues - could be fixed if necessary).
+	 */
+	public static final String TSC_VERSION = "1.8";
 
 	static {
 		JSweetConfig.initClassPath(null);
@@ -124,6 +134,7 @@ public class JSweetTranspiler {
 	private JavaFileManager fileManager;
 	private JavaCompiler compiler;
 	private Log log;
+	private CandiesProcessor candiesProcessor;
 	private boolean preserveSourceLineNumbers = false;
 	private File workingDir;
 	private File tsOutputDir;
@@ -132,7 +143,6 @@ public class JSweetTranspiler {
 	private boolean generateJsFiles = true;
 	private boolean tscWatchMode = false;
 	private File[] tsDefDirs = {};
-	private CandiesProcessor candiesProcessor;
 	private ModuleKind moduleKind = ModuleKind.none;
 	private EcmaScriptComplianceLevel ecmaTargetVersion = EcmaScriptComplianceLevel.ES3;
 	private boolean bundle = false;
@@ -140,6 +150,27 @@ public class JSweetTranspiler {
 	private String encoding = null;
 	private boolean noRootDirectories = false;
 	private boolean ignoreAssertions = false;
+	private boolean ignoreJavaFileNameError = false;
+	private boolean generateDeclarations = false;
+	private File declarationsOutputDir;
+	private boolean jdkAllowed = true;
+	private boolean interfaceTracking = true;
+	private boolean supportGetClass = true;
+	private boolean supportSaticLazyInitialization = true;
+	private boolean generateDefinitions = false;
+	private ArrayList<File> jsLibFiles = new ArrayList<>();
+
+	@Override
+	public String toString() {
+		return "workingDir=" + workingDir + "\ntsOutputDir=" + tsOutputDir + "\njsOutputDir=" + jsOutputDir + "\nclassPath=" + classPath + "\ngenerateJsFiles="
+				+ generateJsFiles + "\ntscWatchMode=" + tscWatchMode + "\ntsDefDirs=" + (tsDefDirs == null ? null : Arrays.asList(tsDefDirs)) + "\nmoduleKind="
+				+ moduleKind + "\necmaTargertVersion=" + ecmaTargetVersion + "\nbundle=" + bundle + "\nbundleDirectory=" + bundlesDirectory + "\nencoding="
+				+ encoding + "\nnoRootDirectories=" + noRootDirectories + "\nignoreAssertions=" + ignoreAssertions + "\nignoreJavaFileNameError="
+				+ ignoreJavaFileNameError + "\ngenerateDeclarations=" + generateDeclarations + "\ndeclarationsOutputDir=" + declarationsOutputDir
+				+ "\njdkAllowed=" + jdkAllowed + "\ninterfaceTracking=" + interfaceTracking + "\nsupportGetClass=" + supportGetClass
+				+ "\nsupportSaticLazyInitialization=" + supportSaticLazyInitialization + "\ngenerateDefinitions=" + generateDefinitions + "\njsLibFiles="
+				+ jsLibFiles;
+	}
 
 	/**
 	 * Creates a JSweet transpiler, with the default values.
@@ -150,7 +181,7 @@ public class JSweetTranspiler {
 	 * to <code>System.getProperty("java.class.path")</code>.
 	 */
 	public JSweetTranspiler() {
-		this(new File(System.getProperty("java.io.tmpdir")), null, System.getProperty("java.class.path"));
+		this(new File(System.getProperty("java.io.tmpdir")), null, null, System.getProperty("java.class.path"));
 	}
 
 	/**
@@ -160,12 +191,14 @@ public class JSweetTranspiler {
 	 *            the directory where TypeScript files are written
 	 * @param jsOutputDir
 	 *            the directory where JavaScript files are written
+	 * @param extractedCandiesJavascriptDir
+	 *            see {@link #getExtractedCandyJavascriptDir()}
 	 * @param classPath
 	 *            the classpath as a string (check out system-specific
 	 *            requirements for Java classpathes)
 	 */
-	public JSweetTranspiler(File tsOutputDir, File jsOutputDir, String classPath) {
-		this(new File(TMP_WORKING_DIR_NAME), tsOutputDir, jsOutputDir, classPath);
+	public JSweetTranspiler(File tsOutputDir, File jsOutputDir, File extractedCandiesJavascriptDir, String classPath) {
+		this(new File(TMP_WORKING_DIR_NAME), tsOutputDir, jsOutputDir, extractedCandiesJavascriptDir, classPath);
 	}
 
 	/**
@@ -177,16 +210,19 @@ public class JSweetTranspiler {
 	 *            the directory where TypeScript files are written
 	 * @param jsOutputDir
 	 *            the directory where JavaScript files are written
+	 * @param extractedCandiesJavascriptDir
+	 *            see {@link #getExtractedCandyJavascriptDir()}
 	 * @param classPath
 	 *            the classpath as a string (check out system-specific
 	 *            requirements for Java classpaths)
 	 */
-	public JSweetTranspiler(File workingDir, File tsOutputDir, File jsOutputDir, String classPath) {
+	public JSweetTranspiler(File workingDir, File tsOutputDir, File jsOutputDir, File extractedCandiesJavascriptDir, String classPath) {
 		this.workingDir = workingDir.getAbsoluteFile();
+		this.extractedCandyJavascriptDir = extractedCandiesJavascriptDir;
 		try {
 			tsOutputDir.mkdirs();
 			this.tsOutputDir = tsOutputDir.getCanonicalFile();
-			if (jsOutputDir != null) {
+			if (jsOutputDir != null && generateJsFiles) {
 				jsOutputDir.mkdirs();
 				this.jsOutputDir = jsOutputDir.getCanonicalFile();
 			}
@@ -199,38 +235,47 @@ public class JSweetTranspiler {
 		logger.info("curent dir: " + new File(".").getAbsolutePath());
 		logger.info("tsOut: " + tsOutputDir + (tsOutputDir == null ? "" : " - " + tsOutputDir.getAbsolutePath()));
 		logger.info("jsOut: " + jsOutputDir + (jsOutputDir == null ? "" : " - " + jsOutputDir.getAbsolutePath()));
+		logger.info("candyJsOut: " + extractedCandiesJavascriptDir);
 		logger.debug("compile classpath: " + classPath);
 		logger.debug("runtime classpath: " + System.getProperty("java.class.path"));
-		this.candiesProcessor = new CandiesProcessor(workingDir, classPath);
+		this.candiesProcessor = new CandiesProcessor(workingDir, classPath, extractedCandyJavascriptDir);
 	}
 
 	/**
-	 * Cleans temporary files.
+	 * Gets this transpiler working directory (where the temporary files are
+	 * stored).
 	 */
-	public void cleanWorkingDirectory() {
-		FileUtils.deleteQuietly(this.workingDir);
-		candiesProcessor.touch();
+	public File getWorkingDirectory() {
+		return this.workingDir;
 	}
 
-	private void initNode(TranspilationHandler transpilationHandler) throws Exception {
+	public void initNode(TranspilationHandler transpilationHandler) throws Exception {
+		ProcessUtil.initNode();
+		logger.debug("extra path: " + ProcessUtil.EXTRA_PATH);
 		File initFile = new File(workingDir, ".node-init");
 		boolean initialized = initFile.exists();
 		if (!initialized) {
-			ProcessUtil.runCommand("node", null, () -> {
+			ProcessUtil.runCommand(ProcessUtil.NODE_COMMAND, null, () -> {
 				transpilationHandler.report(JSweetProblem.NODE_CANNOT_START, null, JSweetProblem.NODE_CANNOT_START.getMessage());
 				throw new RuntimeException("cannot find node.js");
-			} , "--version");
+			}, "--version");
 			initFile.mkdirs();
 			initFile.createNewFile();
 		}
-	}
 
-	private void initNodeCommands(TranspilationHandler transpilationHandler) throws Exception {
-		if (!ProcessUtil.isInstalledWithNpm("tsc")) {
-			ProcessUtil.installNodePackage("typescript", true);
+		String v = "";
+		File tscVersionFile = new File(ProcessUtil.NPM_DIR, "tsc-version");
+		if (tscVersionFile.exists()) {
+			v = FileUtils.readFileToString(tscVersionFile);
 		}
-		if (!ProcessUtil.isInstalledWithNpm("browserify")) {
-			ProcessUtil.installNodePackage("browserify", true);
+		if (!ProcessUtil.isInstalledWithNpm("tsc") || !TSC_VERSION.equals(v.trim())) {
+			// this will lead to performances issues if having multiple versions
+			// of JSweet installed
+			if (ProcessUtil.isInstalledWithNpm("tsc")) {
+				ProcessUtil.uninstallNodePackage("typescript", true);
+			}
+			ProcessUtil.installNodePackage("typescript", TSC_VERSION, true);
+			FileUtils.writeStringToFile(tscVersionFile, TSC_VERSION);
 		}
 	}
 
@@ -267,8 +312,7 @@ public class JSweetTranspiler {
 	}
 
 	private void initJavac(final TranspilationHandler transpilationHandler) {
-		context = new JSweetContext();
-		context.ignoreAssertions = isIgnoreAssertions();
+		context = new JSweetContext(this);
 		options = Options.instance(context);
 		if (classPath != null) {
 			options.put(Option.CLASSPATH, classPath);
@@ -279,36 +323,50 @@ public class JSweetTranspiler {
 				}
 			}
 		}
+		if (encoding != null) {
+			options.put(Option.ENCODING, encoding);
+		}
+		logger.debug("classpath: " + options.get(Option.CLASSPATH));
 		logger.debug("bootclasspath: " + options.get(Option.BOOTCLASSPATH));
+		logger.debug("strict mode: " + context.strictMode);
 		options.put(Option.XLINT, "path");
 		JavacFileManager.preRegister(context);
 		fileManager = context.get(JavaFileManager.class);
-
 		compiler = JavaCompiler.instance(context);
 		compiler.attrParseOnly = true;
 		compiler.verbose = false;
 		compiler.genEndPos = true;
-
+		compiler.keepComments = true;
 		log = Log.instance(context);
-
 		log.dumpOnError = false;
 		log.emitWarnings = false;
-
-		Writer w = new StringWriter() {
+		log.setWriters(new PrintWriter(new StringWriter() {
 			@Override
 			public void write(String str) {
-				TranspilationHandler.OUTPUT_LOGGER.error(getBuffer());
-				getBuffer().delete(0, getBuffer().length());
 			}
-
-		};
-
-		log.setWriter(WriterKind.ERROR, new PrintWriter(w));
+		}));
 		log.setDiagnosticFormatter(new BasicDiagnosticFormatter(JavacMessages.instance(context)) {
 			@Override
 			public String format(JCDiagnostic diagnostic, Locale locale) {
 				if (diagnostic.getKind() == Kind.ERROR) {
-					transpilationHandler.reportSilentError();
+					if (!(ignoreJavaFileNameError && "compiler.err.class.public.should.be.in.file".equals(diagnostic.getCode()))) {
+						transpilationHandler.report(JSweetProblem.INTERNAL_JAVA_ERROR, new SourcePosition(new File(diagnostic.getSource().getName()), null,
+								(int) diagnostic.getLineNumber(), (int) diagnostic.getColumnNumber()), diagnostic.getMessage(locale));
+					}
+				}
+				switch (diagnostic.getKind()) {
+				case ERROR:
+					logger.error(diagnostic);
+					break;
+				case WARNING:
+				case MANDATORY_WARNING:
+					logger.debug(diagnostic);
+					break;
+				case NOTE:
+				case OTHER:
+				default:
+					logger.trace(diagnostic);
+					break;
 				}
 				if (diagnostic.getSource() != null) {
 					return diagnostic.getMessage(locale) + " at " + diagnostic.getSource().getName() + "(" + diagnostic.getLineNumber() + ")";
@@ -317,10 +375,6 @@ public class JSweetTranspiler {
 				}
 			}
 		});
-
-		if (encoding != null) {
-			compiler.encoding = encoding;
-		}
 	}
 
 	private boolean areAllTranspiled(SourceFile... sourceFiles) {
@@ -401,7 +455,7 @@ public class JSweetTranspiler {
 		logger.info("[" + engineName + " engine] eval files: " + Arrays.asList(sourceFiles));
 		if ("Java".equals(engineName)) {
 			// search for main functions
-			JSweetContext context = new JSweetContext();
+			JSweetContext context = new JSweetContext(this);
 			Options options = Options.instance(context);
 			if (classPath != null) {
 				options.put(Option.CLASSPATH, classPath);
@@ -467,21 +521,44 @@ public class JSweetTranspiler {
 
 			StringWriter trace = new StringWriter();
 
+			Process runProcess;
 			if (context.useModules) {
-				File f = sourceFiles[sourceFiles.length - 1].getJsFile();
-				logger.debug("eval file: " + f);
-				ProcessUtil.runCommand("node", line -> trace.append(line + "\n"), null, f.getPath());
+				File f = null;
+				if (!context.entryFiles.isEmpty()) {
+					f = context.entryFiles.get(0);
+					for (SourceFile sf : sourceFiles) {
+						if (sf.getJavaFile().equals(f)) {
+							f = sf.getJsFile();
+						}
+					}
+				}
+				if (f == null) {
+					f = sourceFiles[sourceFiles.length - 1].getJsFile();
+				}
+				logger.info("[modules] eval file: " + f);
+				runProcess = ProcessUtil.runCommand(ProcessUtil.NODE_COMMAND, line -> trace.append(line + "\n"), null, f.getPath());
 			} else {
 				File tmpFile = new File(new File(TMP_WORKING_DIR_NAME), "eval.tmp.js");
 				FileUtils.deleteQuietly(tmpFile);
+				if (jsLibFiles != null) {
+					for (File jsLibFile : jsLibFiles) {
+						String script = FileUtils.readFileToString(jsLibFile);
+						FileUtils.write(tmpFile, script + "\n", true);
+					}
+				}
 				for (SourceFile sourceFile : sourceFiles) {
 					String script = FileUtils.readFileToString(sourceFile.getJsFile());
 					FileUtils.write(tmpFile, script + "\n", true);
 				}
-				logger.debug("eval file: " + tmpFile);
-				ProcessUtil.runCommand("node", line -> trace.append(line + "\n"), null, tmpFile.getPath());
+				logger.info("[no modules] eval file: " + tmpFile);
+				runProcess = ProcessUtil.runCommand(ProcessUtil.NODE_COMMAND, line -> trace.append(line + "\n"), null, tmpFile.getPath());
 			}
 
+			int returnCode = runProcess.exitValue();
+			logger.info("return code=" + returnCode);
+			if (returnCode != 0) {
+				throw new Exception("evaluation error (code=" + returnCode + ") - trace=" + trace);
+			}
 			return new TraceBasedEvaluationResult(trace.getBuffer().toString());
 		}
 	}
@@ -543,6 +620,49 @@ public class JSweetTranspiler {
 		}
 	}
 
+	public List<JCCompilationUnit> setupCompiler(java.util.List<File> files, ErrorCountTranspilationHandler transpilationHandler) throws IOException {
+		initJavac(transpilationHandler);
+		List<JavaFileObject> fileObjects = toJavaFileObjects(fileManager, files);
+
+		logger.info("parsing: " + fileObjects);
+		List<JCCompilationUnit> compilationUnits = compiler.enterTrees(compiler.parseFiles(fileObjects));
+		if (transpilationHandler.getErrorCount() > 0) {
+			return null;
+		}
+		logger.info("attribution phase");
+		compiler.attribute(compiler.todo);
+
+		if (transpilationHandler.getErrorCount() > 0) {
+			return null;
+		}
+		context.useModules = isUsingModules();
+
+		if (context.useModules && bundle) {
+			transpilationHandler.report(JSweetProblem.BUNDLE_WITH_MODULE, null, JSweetProblem.BUNDLE_WITH_MODULE.getMessage());
+			return null;
+		}
+		return compilationUnits;
+	}
+
+	private String ts2js(ErrorCountTranspilationHandler handler, String tsCode, String targetFileName) throws IOException {
+		SourceFile sf = new SourceFile(null);
+		sf.setTsFile(File.createTempFile(targetFileName, ".ts", tsOutputDir));
+		sf.setJsFile(File.createTempFile(targetFileName, ".js", jsOutputDir));
+		try {
+			sf.tsFile.getParentFile().mkdirs();
+			sf.tsFile.createNewFile();
+			Files.write(sf.tsFile.toPath(), Arrays.asList(tsCode));
+		} catch (IOException ex) {
+			throw new UncheckedIOException(ex);
+		}
+		runTSC(handler, new SourceFile[] { sf }, "--target", ecmaTargetVersion.name(), "--outFile", sf.getJsFile().toString(), sf.getTsFile().toString());
+		try {
+			return new String(Files.readAllBytes(sf.jsFile.toPath()));
+		} catch (IOException ex) {
+			return null;
+		}
+	}
+
 	/**
 	 * Transpiles the given Java source files. When the transpiler is in watch
 	 * mode ({@link #setTscWatchMode(boolean)}), the first invocation to this
@@ -558,12 +678,11 @@ public class JSweetTranspiler {
 		transpilationStartTimestamp = System.currentTimeMillis();
 		try {
 			initNode(transpilationHandler);
-			initNodeCommands(transpilationHandler);
 		} catch (Exception e) {
 			logger.error(e.getMessage(), e);
 			return;
 		}
-		candiesProcessor.processCandies();
+		candiesProcessor.processCandies(transpilationHandler);
 		addTsDefDir(candiesProcessor.getCandiesTsdefsDir());
 		if (classPath != null && !ArrayUtils.contains(classPath.split(File.pathSeparator), candiesProcessor.getCandiesProcessedDir().getPath())) {
 			classPath = candiesProcessor.getCandiesProcessedDir() + File.pathSeparator + classPath;
@@ -574,8 +693,6 @@ public class JSweetTranspiler {
 		Collection<SourceFile> jsweetSources = asList(files).stream() //
 				.filter(source -> source.getJavaFile() != null).collect(toList());
 		java2ts(errorHandler, jsweetSources.toArray(new SourceFile[0]));
-		auxiliaryTsModuleFiles.clear();
-		createAuxiliaryModuleFiles(tsOutputDir);
 
 		if (errorHandler.getErrorCount() == 0 && generateJsFiles) {
 			Collection<SourceFile> tsSources = asList(files).stream() //
@@ -583,236 +700,201 @@ public class JSweetTranspiler {
 			ts2js(errorHandler, tsSources.toArray(new SourceFile[0]));
 		}
 
-		generateBundles(errorHandler, files);
+		if (!generateJsFiles) {
+			transpilationHandler.onCompleted(this, !isTscWatchMode(), files);
+		}
+
 		logger.info("transpilation process finished in " + (System.currentTimeMillis() - transpilationStartTimestamp) + " ms");
 	}
 
-	private void generateBundles(ErrorCountTranspilationHandler errorHandler, SourceFile... files) {
-		if (bundle && errorHandler.getErrorCount() == 0) {
-			if (moduleKind != ModuleKind.commonjs) {
-				errorHandler.report(JSweetProblem.BUNDLE_WITH_COMMONJS, null, JSweetProblem.BUNDLE_WITH_COMMONJS.getMessage());
-			}
-			context.packageDependencies.topologicalSort(node -> {
-				if (errorHandler.getErrorCount() == 0) {
-					errorHandler.report(JSweetProblem.BUNDLE_HAS_CYCLE, null,
-							JSweetProblem.BUNDLE_HAS_CYCLE.getMessage(context.packageDependencies.toString()));
-				}
-			});
-			if (errorHandler.getErrorCount() > 0) {
-				return;
-			}
-
-			File prefix = getNpmPrefix();
-			logger.info("checking for used modules: " + context.getUsedModules());
-			for (String module : context.getUsedModules()) {
-				if (module.endsWith(JSweetConfig.MODULE_FILE_NAME)) {
-					continue;
-				}
-				File moduleDir = new File(new File(prefix, "node_modules"), module);
-				if (!moduleDir.exists()) {
-					logger.debug("installing " + module + " in " + moduleDir + "...");
-					// TODO: error reporting
-					ProcessUtil.installNodePackage(module, false);
-				}
-			}
-
-			Set<String> entries = new HashSet<>();
-			for (SourceFile f : files) {
-				if (context.entryFiles.contains(f.getJavaFile())) {
-					entries.add(f.jsFile.getAbsolutePath());
-				}
-			}
-
-			if (entries.isEmpty()) {
-				errorHandler.report(JSweetProblem.BUNDLE_HAS_NO_ENTRIES, null, JSweetProblem.BUNDLE_HAS_NO_ENTRIES.getMessage());
-			}
-
-			for (String entry : entries) {
-				String[] args = { entry };
-				File entryDir = new File(entry).getParentFile();
-				File bundleDirectory = bundlesDirectory != null ? bundlesDirectory : entryDir;
-				if (!bundleDirectory.exists()) {
-					bundleDirectory.mkdirs();
-				}
-				String bundleName = "bundle-" + entryDir.getName() + ".js";
-				args = ArrayUtils.addAll(args, "-o", new File(bundleDirectory, bundleName).getAbsolutePath());
-				logger.info("creating bundle file with browserify, args: " + StringUtils.join(args, ' '));
-				// TODO: keep original ts files sourcemaps:
-				// http://stackoverflow.com/questions/23453160/keep-original-typescript-source-maps-after-using-browserify
-				ProcessUtil.runCommand("browserify", ProcessUtil.USER_HOME_DIR, false, null, null, null, args);
-			}
-
-		}
-
-	}
-
-	private File getNpmPrefix() {
-		File cache = new File(workingDir, ".npm-prefix");
-		if (cache.exists()) {
-			try {
-				return new File(FileUtils.readFileToString(cache));
-			} catch (Exception e) {
-				logger.warn("error reading cache file for npm prefix");
-			}
-		}
-		StringBuilder sb = new StringBuilder();
-		ProcessUtil.runCommand("npm", ProcessUtil.USER_HOME_DIR, false, line -> {
-			if (!StringUtils.isBlank(line))
-				sb.append(line);
-		} , null, null, "prefix");
-		try {
-			FileUtils.write(cache, sb.toString().trim(), false);
-		} catch (Exception e) {
-			logger.warn("error writing cache file for npm prefix");
-		}
-		return new File(sb.toString().trim());
-	}
-
-	private void createAuxiliaryModuleFiles(File rootDir) throws IOException {
-		if (context.useModules) {
-			// export-import submodules
-			File moduleFile = new File(rootDir, JSweetConfig.MODULE_FILE_NAME + ".ts");
-			boolean createModuleFile = !moduleFile.exists();
-			if (!createModuleFile) {
-				boolean isTsFromSourceFile = false;
-				for (SourceFile sourceFile : context.sourceFiles) {
-					if (moduleFile.getAbsolutePath().equals(sourceFile.getTsFile().getAbsolutePath())) {
-						isTsFromSourceFile = true;
-						break;
-					}
-				}
-				createModuleFile = !isTsFromSourceFile;
-			}
-			if (createModuleFile) {
-				createModuleFile = false;
-				// create only auxiliary module files on modules within a root
-				// package
-				for (String roots : context.topLevelPackageNames) {
-					File root = new File(tsOutputDir, roots.replace('.', File.separatorChar));
-					if (rootDir.getPath().startsWith(root.getPath())) {
-						createModuleFile = true;
-						break;
-					}
-				}
-			}
-
-			if (createModuleFile) {
-				FileUtils.deleteQuietly(moduleFile);
-				auxiliaryTsModuleFiles.add(moduleFile);
-			}
-			for (File f : rootDir.listFiles()) {
-				if (f.isDirectory() && !f.getName().startsWith(".")) {
-					if (createModuleFile) {
-						logger.debug("create auxiliary module file: " + moduleFile);
-						FileUtils.write(moduleFile,
-								"export import " + f.getName() + " = require('./" + f.getName() + "/" + JSweetConfig.MODULE_FILE_NAME + "');\n", true);
-					}
-					createAuxiliaryModuleFiles(f);
-				}
-			}
-		}
-	}
-
-	private void java2ts(TranspilationHandler transpilationHandler, SourceFile[] files) throws IOException {
-
-		initJavac(transpilationHandler);
-		List<JavaFileObject> fileObjects = toJavaFileObjects(fileManager, Arrays.asList(SourceFile.toFiles(files)));
-
-		logger.info("parsing: " + fileObjects);
-		List<JCCompilationUnit> compilationUnits = compiler.enterTrees(compiler.parseFiles(fileObjects));
-		if (log.nerrors > 0) {
-			transpilationHandler.report(JSweetProblem.JAVA_ERRORS, null, JSweetProblem.JAVA_ERRORS.getMessage(log.nerrors));
+	private void java2ts(ErrorCountTranspilationHandler transpilationHandler, SourceFile[] files) throws IOException {
+		List<JCCompilationUnit> compilationUnits = setupCompiler(Arrays.asList(SourceFile.toFiles(files)), transpilationHandler);
+		if (compilationUnits == null) {
 			return;
 		}
-		logger.info("attribution phase");
-		compiler.attribute(compiler.todo);
-
-		if (log.nerrors > 0) {
-			transpilationHandler.report(JSweetProblem.JAVA_ERRORS, null, JSweetProblem.JAVA_ERRORS.getMessage(log.nerrors));
-			return;
-		}
-		context.useModules = isUsingModules();
 		context.sourceFiles = files;
 
-		if (context.useModules) {
-			// when using modules, all classes of the same package are folded to
-			// one module file
-			Map<PackageSymbol, StringBuilder> modules = new HashMap<>();
-			Map<PackageSymbol, ArrayList<Integer>> fileIndexes = new HashMap<>();
-			for (int i = 0; i < compilationUnits.length(); i++) {
-				JCCompilationUnit cu = compilationUnits.get(i);
-				logger.info("scanning " + cu.sourcefile.getName() + "...");
-				OverloadScanner overloadChecker = new OverloadScanner(context);
-				overloadChecker.process(cu);
-				AbstractTreePrinter printer = new Java2TypeScriptTranslator(transpilationHandler, context, cu, preserveSourceLineNumbers);
-				printer.print(cu);
-				StringBuilder sb = modules.get(cu.packge);
-				if (sb == null) {
-					sb = new StringBuilder();
-					modules.put(cu.packge, sb);
-				}
-				ArrayList<Integer> indexes = fileIndexes.get(cu.packge);
-				if (indexes == null) {
-					indexes = new ArrayList<Integer>();
-					fileIndexes.put(cu.packge, indexes);
-				}
-				indexes.add(i);
-				sb.append(printer.getOutput());
-			}
-			for (Entry<PackageSymbol, StringBuilder> e : modules.entrySet()) {
-				String outputFileRelativePathNoExt = e.getKey().fullname.toString().replace(".", File.separator) + File.separator
-						+ JSweetConfig.MODULE_FILE_NAME;
-				String outputFileRelativePath = outputFileRelativePathNoExt + ".ts";
-				logger.info("output file: " + outputFileRelativePath);
-				File outputFile = new File(tsOutputDir, outputFileRelativePath);
-				outputFile.getParentFile().mkdirs();
-				String outputFilePath = outputFile.getPath();
-				PrintWriter out = new PrintWriter(outputFilePath);
-				try {
-					out.println(e.getValue().toString());
-				} finally {
-					out.close();
-				}
-				for (Integer i : fileIndexes.get(e.getKey())) {
-					files[i].tsFile = outputFile;
-					files[i].javaFileLastTranspiled = files[i].getJavaFile().lastModified();
-				}
-				logger.info("created " + outputFilePath);
-			}
+		new GlobalBeforeTranslationScanner(transpilationHandler, context).process(compilationUnits);
 
+		if (context.useModules) {
+			generateTsFiles(transpilationHandler, files, compilationUnits);
 		} else {
-			// regular file-to-file generation
-			for (int i = 0; i < compilationUnits.length(); i++) {
-				JCCompilationUnit cu = compilationUnits.get(i);
-				logger.info("scanning " + cu.sourcefile.getName() + "...");
-				OverloadScanner overloadChecker = new OverloadScanner(context);
-				overloadChecker.process(cu);
-				AbstractTreePrinter printer = new Java2TypeScriptTranslator(transpilationHandler, context, cu, preserveSourceLineNumbers);
-				printer.print(cu);
-				String[] s = cu.getSourceFile().getName().split(File.separator.equals("\\") ? "\\\\" : File.separator);
-				String cuName = s[s.length - 1];
-				s = cuName.split("\\.");
-				cuName = s[0];
-				String packageName = isNoRootDirectories() ? Util.getRootRelativeJavaName(cu.packge) : cu.packge.getQualifiedName().toString();
-				String outputFileRelativePathNoExt = packageName.replace(".", File.separator) + File.separator + cuName;
-				String outputFileRelativePath = outputFileRelativePathNoExt + printer.getTargetFilesExtension();
-				logger.info("output file: " + outputFileRelativePath);
-				File outputFile = new File(tsOutputDir, outputFileRelativePath);
-				outputFile.getParentFile().mkdirs();
-				String outputFilePath = outputFile.getPath();
-				PrintWriter out = new PrintWriter(outputFilePath);
-				try {
-					out.println(printer.getResult());
-				} finally {
-					out.close();
-				}
-				files[i].tsFile = outputFile;
-				files[i].javaFileLastTranspiled = files[i].getJavaFile().lastModified();
-				logger.info("created " + outputFilePath);
+			if (bundle) {
+				generateTsBundle(transpilationHandler, files, compilationUnits);
+			} else {
+				generateTsFiles(transpilationHandler, files, compilationUnits);
 			}
 		}
 		log.flush();
 		getOrCreateTscRootFile();
+	}
+
+	private void generateModuleDefs(JCCompilationUnit moduleDefs) throws IOException {
+		StringBuilder out = new StringBuilder();
+		for (String line : FileUtils.readLines(new File(moduleDefs.getSourceFile().getName()))) {
+			if (line.startsWith("///")) {
+				out.append(line.substring(3));
+			}
+		}
+		FileUtils.write(new File(tsOutputDir, "module_defs.d.ts"), out, false);
+	}
+
+	private void generateTsFiles(ErrorCountTranspilationHandler transpilationHandler, SourceFile[] files, List<JCCompilationUnit> compilationUnits)
+			throws IOException {
+		// regular file-to-file generation
+		new OverloadScanner(transpilationHandler, context).process(compilationUnits);
+		for (int i = 0; i < compilationUnits.length(); i++) {
+			JCCompilationUnit cu = compilationUnits.get(i);
+			if (isModuleDefsFile(cu)) {
+				if (context.useModules) {
+					generateModuleDefs(cu);
+				}
+				continue;
+			}
+			logger.info("scanning " + cu.sourcefile.getName() + "...");
+			AbstractTreePrinter printer = new Java2TypeScriptTranslator(transpilationHandler, context, cu, preserveSourceLineNumbers);
+			printer.print(cu);
+			if (StringUtils.isWhitespace(printer.getResult())) {
+				continue;
+			}
+			String[] s = cu.getSourceFile().getName().split(File.separator.equals("\\") ? "\\\\" : File.separator);
+			String cuName = s[s.length - 1];
+			s = cuName.split("\\.");
+			cuName = s[0];
+			String javaSourceFileRelativeFullName = (cu.packge.getQualifiedName().toString().replace(".", File.separator) + File.separator + cuName + ".java");
+			files[i].javaSourceDirRelativeFile = new File(javaSourceFileRelativeFullName);
+			files[i].javaSourceDir = new File(
+					cu.getSourceFile().getName().substring(0, cu.getSourceFile().getName().length() - javaSourceFileRelativeFullName.length()));
+			String packageName = isNoRootDirectories() ? Util.getRootRelativeJavaName(cu.packge) : cu.packge.getQualifiedName().toString();
+			String outputFileRelativePathNoExt = packageName.replace(".", File.separator) + File.separator + cuName;
+			String outputFileRelativePath = outputFileRelativePathNoExt + (cu.packge.fullname.toString().startsWith("def.") ? ".d.ts" : ".ts");
+			logger.info("output file: " + outputFileRelativePath);
+			File outputFile = new File(tsOutputDir, outputFileRelativePath);
+			outputFile.getParentFile().mkdirs();
+			String outputFilePath = outputFile.getPath();
+			PrintWriter out = new PrintWriter(outputFilePath);
+			try {
+				out.println(printer.getResult());
+				out.print(context.getGlobalsMappingString());
+				out.print(context.poolFooterStatements());
+			} finally {
+				out.close();
+			}
+			files[i].tsFile = outputFile;
+			files[i].javaFileLastTranspiled = files[i].getJavaFile().lastModified();
+			files[i].sourceMap = printer.sourceMap;
+			logger.info("created " + outputFilePath);
+		}
+	}
+
+	private boolean isModuleDefsFile(JCCompilationUnit cu) {
+		return cu.getSourceFile().getName().equals("module_defs.java") || cu.getSourceFile().getName().endsWith("/module_defs.java");
+	}
+
+	private void generateTsBundle(ErrorCountTranspilationHandler transpilationHandler, SourceFile[] files, List<JCCompilationUnit> compilationUnits)
+			throws IOException {
+		if (context.useModules) {
+			return;
+		}
+		StaticInitilializerAnalyzer analizer = new StaticInitilializerAnalyzer(context);
+		analizer.process(compilationUnits);
+		ArrayList<Node<JCCompilationUnit>> sourcesInCycle = new ArrayList<>();
+		java.util.List<JCCompilationUnit> orderedCompilationUnits = analizer.globalStaticInitializersDependencies.topologicalSort(n -> {
+			sourcesInCycle.add(n);
+		});
+		if (!sourcesInCycle.isEmpty()) {
+			transpilationHandler.report(JSweetProblem.CYCLE_IN_STATIC_INITIALIZER_DEPENDENCIES, null, JSweetProblem.CYCLE_IN_STATIC_INITIALIZER_DEPENDENCIES
+					.getMessage(sourcesInCycle.stream().map(n -> n.element.sourcefile.getName()).collect(Collectors.toList())));
+
+			DirectedGraph.dumpCycles(sourcesInCycle, u -> u.sourcefile.getName());
+
+			return;
+		}
+
+		new OverloadScanner(transpilationHandler, context).process(orderedCompilationUnits);
+
+		logger.debug("ordered compilation units: " + orderedCompilationUnits.stream().map(cu -> {
+			return cu.sourcefile.getName();
+		}).collect(Collectors.toList()));
+		logger.debug("count: " + compilationUnits.size() + " (initial), " + orderedCompilationUnits.size() + " (ordered)");
+		int[] permutation = new int[orderedCompilationUnits.size()];
+		StringBuilder permutationString = new StringBuilder();
+		for (int i = 0; i < orderedCompilationUnits.size(); i++) {
+			permutation[i] = compilationUnits.indexOf(orderedCompilationUnits.get(i));
+			permutationString.append("" + i + "=" + permutation[i] + ";");
+		}
+		logger.debug("permutation: " + permutationString.toString());
+		createBundle(transpilationHandler, files, permutation, orderedCompilationUnits, false);
+		if (isGenerateDefinitions()) {
+			createBundle(transpilationHandler, files, permutation, orderedCompilationUnits, true);
+		}
+	}
+
+	private void createBundle(ErrorCountTranspilationHandler transpilationHandler, SourceFile[] files, int[] permutation,
+			java.util.List<JCCompilationUnit> orderedCompilationUnits, boolean definitionBundle) throws FileNotFoundException {
+		context.bundleMode = true;
+		StringBuilder sb = new StringBuilder();
+		int lineCount = 0;
+		for (int i = 0; i < orderedCompilationUnits.size(); i++) {
+			JCCompilationUnit cu = orderedCompilationUnits.get(i);
+			if (isModuleDefsFile(cu)) {
+				continue;
+			}
+			if (cu.packge.fullname.toString().startsWith("def.")) {
+				if (!definitionBundle) {
+					continue;
+				}
+			} else {
+				if (definitionBundle) {
+					continue;
+				}
+			}
+			logger.info("scanning " + cu.sourcefile.getName() + "...");
+			AbstractTreePrinter printer = new Java2TypeScriptTranslator(transpilationHandler, context, cu, preserveSourceLineNumbers);
+			printer.print(cu);
+			files[permutation[i]].sourceMap = printer.sourceMap;
+			files[permutation[i]].sourceMap.shiftOutputPositions(lineCount);
+			sb.append(printer.getOutput());
+			lineCount += printer.getCurrentLine();
+		}
+
+		context.bundleMode = false;
+
+		File bundleDirectory = tsOutputDir;
+		if (!bundleDirectory.exists()) {
+			bundleDirectory.mkdirs();
+		}
+		String bundleName = "bundle" + (definitionBundle ? ".d.ts" : ".ts");
+
+		File outputFile = new File(bundleDirectory, bundleName);
+
+		logger.info("creating bundle file: " + outputFile);
+		outputFile.getParentFile().mkdirs();
+		String outputFilePath = outputFile.getPath();
+		PrintWriter out = new PrintWriter(outputFilePath);
+		try {
+			out.println(sb.toString());
+			out.print(context.getGlobalsMappingString());
+			out.print(context.poolFooterStatements());
+		} finally {
+			out.close();
+		}
+		for (int i = 0; i < orderedCompilationUnits.size(); i++) {
+			JCCompilationUnit cu = orderedCompilationUnits.get(i);
+			if (cu.packge.fullname.toString().startsWith("def.")) {
+				if (!definitionBundle) {
+					continue;
+				}
+			} else {
+				if (definitionBundle) {
+					continue;
+				}
+			}
+			files[permutation[i]].tsFile = outputFile;
+			files[permutation[i]].javaFileLastTranspiled = files[permutation[i]].getJavaFile().lastModified();
+		}
+		logger.info("created " + outputFilePath);
+
 	}
 
 	private File getOrCreateTscRootFile() throws IOException {
@@ -833,17 +915,37 @@ public class JSweetTranspiler {
 		public String toString() {
 			return message + " - " + position;
 		}
+
+		public SourcePosition findOriginalPosition(Collection<SourceFile> sourceFiles) {
+			for (SourceFile sourceFile : sourceFiles) {
+				if (sourceFile.tsFile != null && sourceFile.tsFile.getAbsolutePath().endsWith(position.getFile().getPath())) {
+					if (sourceFile.sourceMap != null) {
+						Position inputPosition = sourceFile.sourceMap.findInputPosition(position.getStartLine(), position.getStartColumn());
+						if (inputPosition != null) {
+							return new SourcePosition(sourceFile.getJavaFile(), null, inputPosition);
+						}
+					}
+				}
+			}
+			return null;
+		}
+
 	}
 
-	private static Pattern errorRE = Pattern.compile("(.*)\\((.*)\\): error .*: (.*)");
+	private static Pattern errorRE = Pattern.compile("(.*)\\((.*)\\): error TS[0-9]+: (.*)");
 
 	private static TscOutput parseTscOutput(String outputString) {
 		Matcher m = errorRE.matcher(outputString);
 		TscOutput error = new TscOutput();
 		if (m.matches()) {
 			String[] pos = m.group(2).split(",");
-			error.position = new SourcePosition(new File(m.group(1)), null, -1, -1, Integer.parseInt(pos[0]), Integer.parseInt(pos[1]), -1, -1);
-			error.message = m.group(3);
+			error.position = new SourcePosition(new File(m.group(1)), null, Integer.parseInt(pos[0]), Integer.parseInt(pos[1]));
+			StringBuilder sb = new StringBuilder(m.group(3));
+			sb.setCharAt(0, Character.toLowerCase(sb.charAt(0)));
+			if (sb.charAt(sb.length() - 1) == '.') {
+				sb.deleteCharAt(sb.length() - 1);
+			}
+			error.message = sb.toString();
 		} else {
 			error.message = outputString;
 		}
@@ -852,6 +954,8 @@ public class JSweetTranspiler {
 
 	private Process tsCompilationProcess;
 	private SourceFile[] watchedFiles;
+
+	private File extractedCandyJavascriptDir;
 
 	private Path relativizeTsFile(File file) {
 		try {
@@ -918,13 +1022,19 @@ public class JSweetTranspiler {
 			}
 		}
 
+		if (ecmaTargetVersion.ordinal() >= EcmaScriptComplianceLevel.ES5.ordinal()) {
+			args.add("--experimentalDecorators");
+		}
+
 		if (isTscWatchMode()) {
 			args.add("--watch");
 		}
 		if (isPreserveSourceLineNumbers()) {
 			args.add("--sourceMap");
 		}
-
+		if (isGenerateDeclarations()) {
+			args.add("--declaration");
+		}
 		args.addAll(asList("--rootDir", tsOutputDir.getAbsolutePath()));
 		// args.addAll(asList("--sourceRoot", tsOutputDir.toString()));
 
@@ -953,63 +1063,97 @@ public class JSweetTranspiler {
 		for (File dir : tsDefDirs) {
 			LinkedList<File> tsDefFiles = new LinkedList<>();
 			Util.addFiles(".d.ts", dir, tsDefFiles);
-			logger.info("found tsdef files in " + dir + ": " + tsDefFiles);
 			for (File f : tsDefFiles) {
 				args.add(relativizeTsFile(f).toString());
 			}
 		}
 
+		LinkedList<File> tsDefFiles = new LinkedList<>();
+		Util.addFiles(".d.ts", tsOutputDir, tsDefFiles);
+		for (File f : tsDefFiles) {
+			args.add(relativizeTsFile(f).toString());
+		}
+
 		try {
-			logger.info("launching tsc with args: " + args);
-
-			boolean[] fullPass = { true };
-
-			tsCompilationProcess = ProcessUtil.runCommand("tsc", getTsOutputDir(), isTscWatchMode(), line -> {
-				logger.info(line);
-				TscOutput output = parseTscOutput(line);
-				if (output.position != null) {
-					transpilationHandler.report(JSweetProblem.INTERNAL_TSC_ERROR, output.position, output.message);
-				} else {
-					if (output.message.startsWith("message TS6042:")) {
-						onTsTranspilationCompleted(fullPass[0], transpilationHandler, files);
-						fullPass[0] = false;
-					} else {
-						// TODO enhance tsc feedbacks support: some
-						// messages are swallowed here: for instance
-						// error TS1204: Cannot compile modules into
-						// 'commonjs', 'amd', 'system' or 'umd' when
-						// targeting 'ES6' or higher.
-					}
-				}
-			} , process -> {
-				tsCompilationProcess = null;
-				onTsTranspilationCompleted(fullPass[0], transpilationHandler, files);
-				fullPass[0] = false;
-			} , () -> {
-				if (transpilationHandler.getProblemCount() == 0) {
-					transpilationHandler.report(JSweetProblem.INTERNAL_TSC_ERROR, null, "Unknown tsc error");
-				}
-			} , args.toArray(new String[0]));
-
-			// tsCompilationProcess.waitFor();
-			// if (tsCompilationProcess != null &&
-			// tsCompilationProcess.exitValue() == 1) {
-			// transpilationHandler.report(JSweetProblem.TSC_CANNOT_START, null,
-			// JSweetProblem.TSC_CANNOT_START.getMessage());
-			// }
+			logger.info("launching tsc...");
+			runTSC(transpilationHandler, files, args.toArray(new String[0]));
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
+	}
 
+	private void runTSC(ErrorCountTranspilationHandler transpilationHandler, SourceFile[] files, String... args) {
+		boolean[] fullPass = { true };
+
+		tsCompilationProcess = ProcessUtil.runCommand("tsc", getTsOutputDir(), isTscWatchMode(), line -> {
+			logger.info(line);
+			TscOutput output = parseTscOutput(line);
+			if (output.position != null) {
+				SourcePosition position = output.findOriginalPosition(Arrays.asList(files));
+				if (position == null) {
+					transpilationHandler.report(JSweetProblem.INTERNAL_TSC_ERROR, output.position, output.message);
+				} else {
+					transpilationHandler.report(JSweetProblem.MAPPED_TSC_ERROR, position, output.message);
+				}
+			} else {
+				if (output.message.startsWith("message TS6042:")) {
+					onTsTranspilationCompleted(fullPass[0], transpilationHandler, files);
+					fullPass[0] = false;
+				} else {
+					// TODO enhance tsc feedbacks support: some
+					// messages are swallowed here: for instance
+					// error TS1204: Cannot compile modules into
+					// 'commonjs', 'amd', 'system' or 'umd' when
+					// targeting 'ES6' or higher.
+				}
+			}
+		}, process -> {
+			tsCompilationProcess = null;
+			onTsTranspilationCompleted(fullPass[0], transpilationHandler, files);
+			fullPass[0] = false;
+		}, () -> {
+			if (transpilationHandler.getProblemCount() == 0) {
+				transpilationHandler.report(JSweetProblem.INTERNAL_TSC_ERROR, null, "Unknown tsc error");
+			}
+		}, args);
+
+		// tsCompilationProcess.waitFor();
+		// if (tsCompilationProcess != null &&
+		// tsCompilationProcess.exitValue() == 1) {
+		// transpilationHandler.report(JSweetProblem.TSC_CANNOT_START, null,
+		// JSweetProblem.TSC_CANNOT_START.getMessage());
+		// }
 	}
 
 	private void onTsTranspilationCompleted(boolean fullPass, ErrorCountTranspilationHandler handler, SourceFile[] files) {
 		try {
+			if (isGenerateDeclarations()) {
+				if (getDeclarationsOutputDir() != null) {
+					logger.info("moving d.ts files to " + getDeclarationsOutputDir());
+					LinkedList<File> dtsFiles = new LinkedList<File>();
+					File rootDir = jsOutputDir == null ? tsOutputDir : jsOutputDir;
+					Util.addFiles(".d.ts", rootDir, dtsFiles);
+					for (File dtsFile : dtsFiles) {
+						String relativePath = Util.getRelativePath(rootDir.getAbsolutePath(), dtsFile.getAbsolutePath());
+						File targetFile = new File(getDeclarationsOutputDir(), relativePath);
+						logger.info("moving " + dtsFile + " to " + targetFile);
+						if (targetFile.exists()) {
+							FileUtils.deleteQuietly(targetFile);
+						}
+						try {
+							FileUtils.moveFile(dtsFile, targetFile);
+						} catch (Exception e) {
+							logger.error(e.getMessage(), e);
+						}
+					}
+				}
+			}
 			if (handler.getErrorCount() == 0) {
 				Set<File> handledFiles = new HashSet<>();
 				for (SourceFile sourceFile : files) {
 					if (!sourceFile.getTsFile().getAbsolutePath().startsWith(tsOutputDir.getAbsolutePath())) {
-						throw new RuntimeException("ts directory isn't configured properly, please use setTsDir");
+						throw new RuntimeException("ts directory isn't configured properly, please use setTsDir: " + sourceFile.getTsFile().getAbsolutePath()
+								+ " != " + tsOutputDir.getAbsolutePath());
 					}
 					String outputFileRelativePath = sourceFile.getTsFile().getAbsolutePath().substring(tsOutputDir.getAbsolutePath().length());
 					File outputFile = new File(jsOutputDir == null ? tsOutputDir : jsOutputDir, Util.removeExtension(outputFileRelativePath) + ".js");
@@ -1025,15 +1169,16 @@ public class JSweetTranspiler {
 							sourceFile.jsMapFile = mapFile;
 							logger.info("redirecting map file: " + mapFile);
 							String map = FileUtils.readFileToString(mapFile);
-							String relativeJavaFilePath = "";
 							try {
-								Path relativePath = outputFile.getParentFile().getCanonicalFile().toPath()
-										.relativize(sourceFile.getJavaFile().getCanonicalFile().toPath());
-								relativeJavaFilePath = relativePath.toString().replace('\\', '/');
-							} catch (IllegalArgumentException e) {
+								if (sourceFile.javaSourceDir != null) {
+									map = StringUtils.replacePattern(map, "\"sourceRoot\":\"\"", "\"sourceRoot\":\"" + sourceFile.getJsFile().getParentFile()
+											.getCanonicalFile().toPath().relativize(sourceFile.javaSourceDir.getCanonicalFile().toPath()) + "/\"");
+									map = StringUtils.replacePattern(map, "\"sources\":\\[\".*\"\\]",
+											"\"sources\":\\[\"" + sourceFile.javaSourceDirRelativeFile.getPath() + "\"\\]");
+								}
+							} catch (Exception e) {
 								logger.warn("cannot resolve path to source file for .map", e);
 							}
-							map = StringUtils.replacePattern(map, "\"sources\":\\[\".*\"\\]", "\"sources\":\\[\"" + relativeJavaFilePath + "\"\\]");
 							FileUtils.writeStringToFile(mapFile, map);
 							// mapFile.setLastModified(sourceFile)
 							sourceFile.jsFileLastTranspiled = outputFile.lastModified();
@@ -1048,11 +1193,12 @@ public class JSweetTranspiler {
 		}
 	}
 
-	/**
-	 * Tells if the transpiler preserves the generated TypeScript source line
-	 * numbers wrt the Java original source file (allows for Java debugging
-	 * through js.map files).
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#isPreserveSourceLineNumbers()
 	 */
+	@Override
 	public boolean isPreserveSourceLineNumbers() {
 		return preserveSourceLineNumbers;
 	}
@@ -1066,9 +1212,12 @@ public class JSweetTranspiler {
 		this.preserveSourceLineNumbers = preserveSourceLineNumbers;
 	}
 
-	/**
-	 * Gets the current TypeScript output directory.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#getTsOutputDir()
 	 */
+	@Override
 	public File getTsOutputDir() {
 		return tsOutputDir;
 	}
@@ -1080,9 +1229,12 @@ public class JSweetTranspiler {
 		this.tsOutputDir = tsOutputDir;
 	}
 
-	/**
-	 * Gets the current JavaScript output directory.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#getJsOutputDir()
 	 */
+	@Override
 	public File getJsOutputDir() {
 		return jsOutputDir;
 	}
@@ -1097,6 +1249,7 @@ public class JSweetTranspiler {
 	/**
 	 * Tells if the JavaScript generation is enabled/disabled.
 	 */
+	@Override
 	public boolean isGenerateJsFiles() {
 		return generateJsFiles;
 	}
@@ -1183,9 +1336,12 @@ public class JSweetTranspiler {
 		this.ecmaTargetVersion = ecmaTargetVersion;
 	}
 
-	/**
-	 * Gets the module kind when transpiling to code using JavaScript modules.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#getModuleKind()
 	 */
+	@Override
 	public ModuleKind getModuleKind() {
 		return moduleKind;
 	}
@@ -1204,10 +1360,12 @@ public class JSweetTranspiler {
 		return moduleKind != null && moduleKind != ModuleKind.none;
 	}
 
-	/**
-	 * Gets the directory where JavaScript bundles are generated when the bundle
-	 * option is activated.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#getBundlesDirectory()
 	 */
+	@Override
 	public File getBundlesDirectory() {
 		return bundlesDirectory;
 	}
@@ -1220,10 +1378,12 @@ public class JSweetTranspiler {
 		this.bundlesDirectory = bundlesDirectory;
 	}
 
-	/**
-	 * Tells if this transpiler generates JavaScript bundles for running in a
-	 * Web browser.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#isBundle()
 	 */
+	@Override
 	public boolean isBundle() {
 		return bundle;
 	}
@@ -1236,9 +1396,12 @@ public class JSweetTranspiler {
 		this.bundle = bundle;
 	}
 
-	/**
-	 * Gets the expected Java source code encoding.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#getEncoding()
 	 */
+	@Override
 	public String getEncoding() {
 		return encoding;
 	}
@@ -1250,12 +1413,12 @@ public class JSweetTranspiler {
 		this.encoding = encoding;
 	}
 
-	/**
-	 * Tells if this transpiler skips the root directories (packages annotated
-	 * with @jsweet.lang.Root) so that the generated file hierarchy starts at
-	 * the root directories rather than including the entire directory
-	 * structure.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#isNoRootDirectories()
 	 */
+	@Override
 	public boolean isNoRootDirectories() {
 		return noRootDirectories;
 	}
@@ -1270,10 +1433,12 @@ public class JSweetTranspiler {
 		this.noRootDirectories = noRootDirectories;
 	}
 
-	/**
-	 * Tells if the transpiler should ignore the 'assert' statements or generate
-	 * appropriate code.
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#isIgnoreAssertions()
 	 */
+	@Override
 	public boolean isIgnoreAssertions() {
 		return ignoreAssertions;
 	}
@@ -1284,6 +1449,119 @@ public class JSweetTranspiler {
 	 */
 	public void setIgnoreAssertions(boolean ignoreAssertions) {
 		this.ignoreAssertions = ignoreAssertions;
+	}
+
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see org.jsweet.transpiler.JSweetOptions#isIgnoreJavaFileNameError()
+	 */
+	@Override
+	public boolean isIgnoreJavaFileNameError() {
+		return ignoreJavaFileNameError;
+	}
+
+	public void setIgnoreJavaFileNameError(boolean ignoreJavaFileNameError) {
+		this.ignoreJavaFileNameError = ignoreJavaFileNameError;
+	}
+
+	@Override
+	public boolean isGenerateDeclarations() {
+		return generateDeclarations;
+	}
+
+	public void setGenerateDeclarations(boolean generateDeclarations) {
+		this.generateDeclarations = generateDeclarations;
+	}
+
+	@Override
+	public File getDeclarationsOutputDir() {
+		return declarationsOutputDir;
+	}
+
+	public void setDeclarationsOutputDir(File declarationsOutputDir) {
+		this.declarationsOutputDir = declarationsOutputDir;
+	}
+
+	@Override
+	public File getExtractedCandyJavascriptDir() {
+		return extractedCandyJavascriptDir;
+	}
+
+	@Override
+	public boolean isJDKAllowed() {
+		return jdkAllowed;
+	}
+
+	/**
+	 * Add JavaScript libraries that are used for the JavaScript evaluation.
+	 * 
+	 * @see #eval(TranspilationHandler, SourceFile...)
+	 */
+	public void addJsLibFiles(File... files) {
+		jsLibFiles.addAll(Arrays.asList(files));
+	}
+
+	/**
+	 * Clears JavaScript libraries that are used for the JavaScript evaluation.
+	 * 
+	 * @see #eval(TranspilationHandler, SourceFile...)
+	 */
+	public void clearJsLibFiles() {
+		jsLibFiles.clear();
+	}
+
+	/**
+	 * Transpiles the given Java AST.
+	 * 
+	 * @param transpilationHandler
+	 *            the log handler
+	 * @param tree
+	 *            the AST to be transpiled
+	 * @param targetFileName
+	 *            the name of the file (without any extension) where to put the
+	 *            transpilation output
+	 * @throws IOException
+	 */
+	public String transpile(ErrorCountTranspilationHandler handler, JCTree tree, String targetFileName) throws IOException {
+		Java2TypeScriptTranslator translator = new Java2TypeScriptTranslator(handler, context, null, false);
+		translator.enterScope();
+		translator.scan(tree);
+		translator.exitScope();
+		String tsCode = translator.getResult();
+		return ts2js(handler, tsCode, targetFileName);
+	}
+
+	public boolean isInterfaceTracking() {
+		return interfaceTracking;
+	}
+
+	public void setInterfaceTracking(boolean interfaceTracking) {
+		this.interfaceTracking = interfaceTracking;
+	}
+
+	public boolean isSupportGetClass() {
+		return supportGetClass;
+	}
+
+	public void setSupportGetClass(boolean supportGetClass) {
+		this.supportGetClass = supportGetClass;
+	}
+
+	public boolean isSupportSaticLazyInitialization() {
+		return supportSaticLazyInitialization;
+	}
+
+	public void setSupportSaticLazyInitialization(boolean supportSaticLazyInitialization) {
+		this.supportSaticLazyInitialization = supportSaticLazyInitialization;
+	}
+
+	public boolean isGenerateDefinitions() {
+		return generateDefinitions;
+	}
+
+	public void setGenerateDefinitions(boolean generateDefinitions) {
+		this.generateDefinitions = generateDefinitions;
 	}
 
 }

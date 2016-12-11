@@ -16,47 +16,68 @@
  */
 package org.jsweet.test.transpiler;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
 import org.jsweet.transpiler.JSweetProblem;
+import org.jsweet.transpiler.ModuleKind;
 import org.jsweet.transpiler.util.EvaluationResult;
 import org.junit.Assert;
 import org.junit.Test;
 
+import source.candies.SocketIOLib;
 import source.throwable.InvalidTryCatchTest;
+import source.throwable.MultipleTryCatchTest;
+import source.throwable.Throwables;
 import source.throwable.TryCatchFinallyTest;
 
 public class ThrowableTests extends AbstractTest {
 
 	@Test
 	public void testTryCatchFinally() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			EvaluationResult r = transpiler.eval(logHandler, getSourceFile(TryCatchFinallyTest.class));
+		eval(ModuleKind.none, (logHandler, r) -> {
 			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
 			Assert.assertNotNull("Test was not executed", r.get("executed"));
 			Assert.assertEquals("Expected a message when the catch clause is executed", "test-message", r.get("message"));
 			Assert.assertNotNull("Finally was not executed", r.get("finally_executed"));
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		}, getSourceFile(TryCatchFinallyTest.class));
+	}
+
+	@Test
+	public void testMultipleTryCatch() {
+		eval(ModuleKind.none, (logHandler, r) -> {
+			Assert.assertEquals("There should be no errors", 0, logHandler.reportedProblems.size());
+			Assert.assertNotNull("Test was not executed", r.get("executed"));
+			Assert.assertEquals("Expected a message when the catch clause is executed", "test-message", r.get("message1"));
+			Assert.assertNotNull("Finally was not executed", r.get("finally_executed"));
+			Assert.assertNull(r.get("message2"));
+			Assert.assertNull(r.get("message3"));
+		}, getSourceFile(MultipleTryCatchTest.class));
 	}
 
 	@Test
 	public void testInvalidTryCatch() {
-		TestTranspilationHandler logHandler = new TestTranspilationHandler();
-		try {
-			transpiler.transpile(logHandler, getSourceFile(InvalidTryCatchTest.class));
-			Assert.assertEquals("There should be 4 errors", 4, logHandler.reportedProblems.size());
-			Assert.assertEquals("Unexpected error", JSweetProblem.TRY_WITH_MULTIPLE_CATCHES, logHandler.reportedProblems.get(0));
-			Assert.assertEquals("Unexpected error", JSweetProblem.UNSUPPORTED_TRY_WITH_RESOURCE, logHandler.reportedProblems.get(1));
-			Assert.assertEquals("Unexpected error", JSweetProblem.TRY_WITHOUT_CATCH_OR_FINALLY, logHandler.reportedProblems.get(2));
-			Assert.assertEquals("Unexpected error", JSweetProblem.JDK_METHOD, logHandler.reportedProblems.get(3));
-		} catch (Exception e) {
-			e.printStackTrace();
-			fail("Exception occured while running test");
-		}
+		transpile(ModuleKind.none, logHandler -> {
+			logHandler.assertReportedProblems(JSweetProblem.UNSUPPORTED_TRY_WITH_RESOURCE, JSweetProblem.TRY_WITHOUT_CATCH_OR_FINALLY);
+		}, getSourceFile(InvalidTryCatchTest.class));
+	}
+
+	@Test
+	public void testThrowables() {
+		eval((handler, result) -> {
+			handler.assertReportedProblems();
+			Assert.assertEquals(true, result.get("catch1"));
+			Assert.assertEquals(true, result.get("catch2"));
+			// the message is not passed to the error superclass...
+			// it seems to be a well-known problem of current JS engines:
+			// https://github.com/Microsoft/TypeScript/issues/5069
+			// TODO: should we patch it or wait that it is fixed?
+			Assert.assertEquals("message", result.get("message2"));
+			Assert.assertEquals(true, result.get("catch3"));
+			Assert.assertEquals("message2", result.get("message3"));
+			// cause does not work yet and returns the current error
+			Assert.assertEquals(true, result.get("cause"));
+		}, getSourceFile(Throwables.class));
 	}
 
 }

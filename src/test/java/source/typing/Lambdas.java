@@ -16,22 +16,53 @@
  */
 package source.typing;
 
-import java.util.function.Function;
 import static jsweet.util.Globals.$export;
 
-public class Lambdas {
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.BinaryOperator;
+import java.util.function.DoubleConsumer;
+import java.util.function.DoubleSupplier;
+import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
+import jsweet.util.function.TriFunction;
+
+public class Lambdas<T> {
+	
+	final BinaryOperator<T>[] operations = null;
+    final Lambdas<UnaryOperator<T>> unary = null;
+    
 	void m() {
-		Runnable r = (Runnable) () -> {};
+		Runnable r = (Runnable) () -> {
+		};
 		r.run();
 	}
-	
+
 	void test(Function<String, String> f) {
 		$export("result", f.apply("a"));
 	}
 
 	public static void main(String[] args) {
-		new Lambdas().test(p -> p);
+		new Lambdas<String>().test(p -> p);
 	}
-	
+
+	void invoker() {
+		f1.apply("a", "b");
+		f2.apply("a", "b", "c");
+		f3.getAsDouble();
+		f4.accept(20);
+		f5.accept("a", "b");
+	}
+
+	BiFunction<String, String, Boolean> f1;
+
+	TriFunction<String, String, String, Boolean> f2;
+
+	DoubleSupplier f3;
+
+	DoubleConsumer f4;
+
+	BiConsumer<String, String> f5;
+
 }

@@ -19,12 +19,15 @@ package org.jsweet.transpiler.util;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Stack;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * This class defines a directed graph collection type, that is to say a set of
@@ -64,7 +67,7 @@ import java.util.function.Consumer;
  */
 public class DirectedGraph<T> implements Collection<T> {
 
-	private Map<T, Node<T>> nodes = new HashMap<T, Node<T>>();
+	private Map<T, Node<T>> nodes = new LinkedHashMap<T, Node<T>>();
 
 	/**
 	 * Constructs an empty graph collection.
@@ -88,7 +91,7 @@ public class DirectedGraph<T> implements Collection<T> {
 	 */
 	@Override
 	public boolean add(T element) {
-		if(nodes.containsKey(element)) {
+		if (nodes.containsKey(element)) {
 			return false;
 		}
 		Node<T> node = new Node<T>(this, element);
@@ -347,18 +350,18 @@ public class DirectedGraph<T> implements Collection<T> {
 	public static class Node<T> {
 		private DirectedGraph<T> graph;
 		public final T element;
-		public final HashSet<Edge<T>> inEdges;
-		public final HashSet<Edge<T>> usedInEdges;
-		public final HashSet<Edge<T>> outEdges;
-		public final HashSet<Edge<T>> usedOutEdges;
+		public final LinkedHashSet<Edge<T>> inEdges;
+		public final LinkedHashSet<Edge<T>> usedInEdges;
+		public final LinkedHashSet<Edge<T>> outEdges;
+		public final LinkedHashSet<Edge<T>> usedOutEdges;
 
 		public Node(DirectedGraph<T> graph, T element) {
 			this.graph = graph;
 			this.element = element;
-			inEdges = new HashSet<Edge<T>>();
-			usedInEdges = new HashSet<Edge<T>>();
-			outEdges = new HashSet<Edge<T>>();
-			usedOutEdges = new HashSet<Edge<T>>();
+			inEdges = new LinkedHashSet<Edge<T>>();
+			usedInEdges = new LinkedHashSet<Edge<T>>();
+			outEdges = new LinkedHashSet<Edge<T>>();
+			usedOutEdges = new LinkedHashSet<Edge<T>>();
 		}
 
 		public void addEdge(T destinationElement) {
@@ -435,8 +438,8 @@ public class DirectedGraph<T> implements Collection<T> {
 	}
 
 	/**
-	 * Sorts this graph using a topological sort algorithm given in this <a
-	 * href=
+	 * Sorts this graph using a topological sort algorithm given in this
+	 * <a href=
 	 * "http://stackoverflow.com/questions/2739392/sample-directed-graph-and-topological-sort-code"
 	 * >StackOverflow thread</a>.
 	 * 
@@ -451,7 +454,7 @@ public class DirectedGraph<T> implements Collection<T> {
 		ArrayList<Node<T>> L = new ArrayList<Node<T>>();
 
 		// S <- Set of all nodes with no incoming edges
-		HashSet<Node<T>> S = new HashSet<Node<T>>();
+		LinkedHashSet<Node<T>> S = new LinkedHashSet<Node<T>>();
 		for (Node<T> n : allNodes) {
 			if (n.inEdges.size() == 0) {
 				S.add(n);
@@ -495,9 +498,42 @@ public class DirectedGraph<T> implements Collection<T> {
 		return toElements(L);
 	}
 
+	/**
+	 * Dumps the found cycles to System.out.
+	 * 
+	 * @param nodes
+	 *            the nodes in which to look for cycles
+	 * @param toString
+	 *            the element's toString function
+	 */
+	public static <T> void dumpCycles(List<Node<T>> nodes, Function<T, String> toString) {
+		for (Node<T> node : nodes) {
+			Stack<Node<T>> path = new Stack<Node<T>>();
+			path.add(node);
+			dumpCycles(nodes, path, toString);
+		}
+	}
+
+	private static <T> void dumpCycles(List<Node<T>> nodes, Stack<Node<T>> path, Function<T, String> toString) {
+		path.peek().outEdges.stream().map(e -> e.to).forEach(node -> {
+			if (nodes.contains(node)) {
+				if (path.contains(node)) {
+					System.out.println("cycle: " + path.stream().map(n -> toString.apply(n.element)).collect(Collectors.toList()));
+				} else {
+					path.push(node);
+					dumpCycles(nodes, path, toString);
+					path.pop();
+				}
+			}
+		});
+		;
+	}
+
 	public static void main(String[] args) {
 		DirectedGraph<Integer> g = new DirectedGraph<Integer>();
 		g.add(7, 5, 3, 11, 8, 2, 9, 10);
+		System.out.println(g.nodes.values());
+		System.out.println(g.nodes.keySet());
 		g.buildEdges(new Comparator<Integer>() {
 			@Override
 			public int compare(Integer o1, Integer o2) {

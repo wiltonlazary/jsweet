@@ -21,14 +21,22 @@ import static org.apache.commons.lang3.StringUtils.join;
 
 import java.util.List;
 import java.util.Stack;
+import java.util.function.Consumer;
 
 import org.apache.log4j.Logger;
 import org.jsweet.transpiler.JSweetContext;
 import org.jsweet.transpiler.TranspilationHandler;
 import org.jsweet.transpiler.TypeChecker;
 
+import com.sun.tools.javac.code.Symbol;
+import com.sun.tools.javac.code.Type;
+import com.sun.tools.javac.code.Type.MethodType;
 import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCCompilationUnit;
+import com.sun.tools.javac.tree.JCTree.JCExpression;
+import com.sun.tools.javac.tree.JCTree.JCMethodInvocation;
+import com.sun.tools.javac.tree.JCTree.JCNewClass;
+import com.sun.tools.javac.tree.JCTree.JCVariableDecl;
 
 /**
  * A tree printer is a kind of tree scanner specialized in pretty printing the
@@ -39,36 +47,6 @@ import com.sun.tools.javac.tree.JCTree.JCCompilationUnit;
 public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 
 	private static final Logger logger = Logger.getLogger(AbstractTreePrinter.class);
-	
-	/**
-	 * Represents a position in the source file.
-	 * 
-	 * @author Renaud Pawlak
-	 */
-	public static class Position {
-		/**
-		 * The character position.
-		 */
-		public int position;
-		/**
-		 * The position's line.
-		 */
-		public int line;
-		/**
-		 * The position's column.
-		 */
-		public int column;
-
-		/**
-		 * Creates a new position.
-		 */
-		public Position(int position, int line, int column) {
-			super();
-			this.position = position;
-			this.line = line;
-			this.column = column;
-		}
-	}
 
 	private Stack<Position> positionStack = new Stack<>();
 
@@ -83,12 +61,6 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 	public Stack<Position> getPositionStack() {
 		return positionStack;
 	}
-
-	/**
-	 * This method must be overridden to define the printer output files
-	 * extension.
-	 */
-	public abstract String getTargetFilesExtension();
 
 	private static final String INDENT = "    ";
 
@@ -105,6 +77,8 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 	private int currentColumn = 0;
 
 	private boolean preserveSourceLineNumbers = true;
+
+	public SourceMap sourceMap = new SourceMap();
 
 	/**
 	 * Creates a new printer.
@@ -187,15 +161,20 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 			// }
 		}
 		positionStack.push(new Position(getCurrentPosition(), currentLine, currentColumn));
+		if (compilationUnit != null && tree.pos >= 0) {
+			sourceMap.addEntry(new Position(tree.pos, //
+					compilationUnit.lineMap.getLineNumber(tree.pos), //
+					compilationUnit.lineMap.getColumnNumber(tree.pos)), positionStack.peek());
+		}
 	}
 
 	@Override
 	protected void onRollbacked(JCTree target) {
 		super.onRollbacked(target);
 		Position position = positionStack.peek();
-		out.delete(position.position, out.length());
-		currentColumn = position.column;
-		currentLine = position.line;
+		out.delete(position.getPosition(), out.length());
+		currentColumn = position.getColumn();
+		currentLine = position.getLine();
 	}
 
 	/**
@@ -226,7 +205,7 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 	 */
 	public AbstractTreePrinter printIndent() {
 		for (int i = 0; i < indent; i++) {
-			out.append(INDENT);
+			print(INDENT);
 		}
 		return this;
 	}
@@ -248,7 +227,7 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 	}
 
 	/**
-	 * Outputs a string.
+	 * Outputs a string (new lines are not allowed).
 	 */
 	public AbstractTreePrinter print(String string) {
 		out.append(string);
@@ -259,27 +238,32 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 	/**
 	 * Outputs an identifier.
 	 */
-	public AbstractTreePrinter printIdentifier(String identifier) {
-		String adaptedIdentifier = getAdapter().getIdentifier(identifier);
-		out.append(adaptedIdentifier);
-		currentColumn += adaptedIdentifier.length();
-		return this;
+	public AbstractTreePrinter printIdentifier(Symbol symbol) {
+		String adaptedIdentifier = getAdapter().getIdentifier(symbol);
+		return print(adaptedIdentifier);
 	}
 
 	/**
 	 * Adds a space to the output.
 	 */
 	public AbstractTreePrinter space() {
-		print(" ");
-		return this;
+		return print(" ");
 	}
 
 	/**
 	 * Removes the last output character.
 	 */
 	public AbstractTreePrinter removeLastChar() {
+		if (out.length() == 0) {
+			return this;
+		}
+		if (out.charAt(out.length() - 1) == '\n') {
+			currentLine--;
+			currentColumn = 0;
+		} else {
+			currentColumn--;
+		}
 		out.deleteCharAt(out.length() - 1);
-		currentColumn--;
 		return this;
 	}
 
@@ -287,10 +271,9 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 	 * Removes the last output characters.
 	 */
 	public AbstractTreePrinter removeLastChars(int count) {
-		if (count > 0) {
-			out.delete(out.length() - count, out.length());
+		for (int i = 0; i < count; i++) {
+			removeLastChar();
 		}
-		currentColumn -= count;
 		return this;
 	}
 
@@ -338,12 +321,60 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 		this.adapter = adapter;
 	}
 
+	protected boolean inArgListTail = false;
+
 	/**
-	 * Print a comma-separated list of subtrees.
+	 * Prints a comma-separated list of subtrees.
 	 */
-	public AbstractTreePrinter printArgList(List<? extends JCTree> args) {
+	public AbstractTreePrinter printArgList(List<? extends JCTree> args, Consumer<JCTree> printer) {
 		for (JCTree arg : args) {
-			print(arg);
+			if (printer != null) {
+				printer.accept(arg);
+			} else {
+				print(arg);
+			}
+			print(", ");
+			inArgListTail = true;
+		}
+		inArgListTail = false;
+		if (!args.isEmpty()) {
+			removeLastChars(2);
+		}
+		return this;
+	}
+
+	/**
+	 * Prints an invocation argument list, with type assignment.
+	 */
+	public AbstractTreePrinter printArgList(JCMethodInvocation inv) {
+		for (int i = 0; i < inv.args.size(); i++) {
+			JCExpression arg = inv.args.get(i);
+			if (inv.meth.type != null) {
+				List<Type> argTypes = ((MethodType) inv.meth.type).argtypes;
+				Type paramType = i < argTypes.size() ? argTypes.get(i) : argTypes.get(argTypes.size() - 1);
+				if (!getAdapter().substituteAssignedExpression(paramType, arg)) {
+					print(arg);
+				}
+			}
+			if (i < inv.args.size() - 1) {
+				print(", ");
+			}
+		}
+		return this;
+	}
+
+	public AbstractTreePrinter printArgList(List<? extends JCTree> args) {
+		return printArgList(args, null);
+	}
+
+	public abstract AbstractTreePrinter printConstructorArgList(JCNewClass newClass);
+
+	/**
+	 * Prints a comma-separated list of variable names (no types).
+	 */
+	public AbstractTreePrinter printVarNameList(List<JCVariableDecl> args) {
+		for (JCVariableDecl arg : args) {
+			print(arg.name.toString());
 			print(", ");
 		}
 		if (!args.isEmpty()) {
@@ -353,7 +384,7 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 	}
 
 	/**
-	 * Print a comma-separated list of type subtrees.
+	 * Prints a comma-separated list of type subtrees.
 	 */
 	public AbstractTreePrinter printTypeArgList(List<? extends JCTree> args) {
 		for (JCTree arg : args) {
@@ -420,4 +451,18 @@ public abstract class AbstractTreePrinter extends AbstractTreeScanner {
 
 		return this;
 	}
+
+	public String getRootRelativeName(Symbol symbol) {
+		return Util.getRootRelativeName(context.useModules ? context.getImportedElements(compilationUnit.getSourceFile().getName()) : null, symbol);
+	}
+
+	public String getRootRelativeName(Symbol symbol, boolean useJavaNames) {
+		return Util.getRootRelativeName(context.useModules ? context.getImportedElements(compilationUnit.getSourceFile().getName()) : null, symbol,
+				useJavaNames);
+	}
+
+	public int getIndent() {
+		return indent;
+	}
+
 }

@@ -16,26 +16,66 @@
  */
 package source.syntax;
 
+import static jsweet.util.Globals.$export;
+import static jsweet.util.Globals.string;
+
+import jsweet.lang.Array;
+
 public class Keywords {
 
+	static Array<String> trace = new Array<String>();
+
+	public static void main(String[] arguments) {
+		Keywords k = new Keywords("a");
+		trace.push(k.in);
+		k.m();
+		k.m2(1, 2);
+		$export("trace", trace.join(","));
+	}
+
+	String in;
+
+	Keywords(String in) {
+		super();
+		this.in = in;
+		String arguments = "";
+		System.out.println(arguments);
+	}
+
+	Keywords(String in, int i) {
+		super();
+		this.in = in;
+	}
+
 	void var(String s, int i) {
+	}
+
+	void f(String in) {
+		this.in = in;
+	}
+
+	void f(String in, String prefix) {
+		this.in = prefix + in;
+		var(in, in.length());
 	}
 
 	void function(String typeof, int i) {
 		typeof = "";
 	}
 
-	@SuppressWarnings("unused")
 	void m() {
-		Integer var = null;
-		String function = null;
+		Integer var = 1;
+		String function = "f";
+		trace.push("" + var);
+		trace.push(function);
 	}
 
 	void m2(int var, long function) {
 		var = 2;
 		var = (int) function;
-		@SuppressWarnings("unused")
+		trace.push("" + var);
 		String constructor = "abc";
+		trace.push(constructor);
 	}
 
 }

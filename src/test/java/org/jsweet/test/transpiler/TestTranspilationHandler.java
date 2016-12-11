@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import org.jsweet.transpiler.JSweetProblem;
+import org.jsweet.transpiler.SourcePosition;
 import org.jsweet.transpiler.util.ConsoleTranspilationHandler;
 
 public class TestTranspilationHandler extends ConsoleTranspilationHandler {
@@ -33,6 +34,13 @@ public class TestTranspilationHandler extends ConsoleTranspilationHandler {
 	@Override
 	public void report(JSweetProblem problem, SourcePosition sourcePosition, String message) {
 		super.report(problem, sourcePosition, message);
+
+		// TODO : this should be cleaner. Warnings should be added to a side
+		// list so we could assert that problems size == 0 even with warnings
+		if (problem == JSweetProblem.CANDY_VERSION_DISCREPANCY) {
+			return;
+		}
+
 		reportedProblems.add(problem);
 		reportedSourcePositions.add(sourcePosition);
 	}

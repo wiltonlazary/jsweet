@@ -3,7 +3,7 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>org.jsweet</groupId>
 	<artifactId>jsweet-transpiler</artifactId>
-	<version>1.0.0-SNAPSHOT</version>
+	<version>1.2.0-SNAPSHOT</version>
 	<name>JSweet transpiler</name>
 	<description>Programming Web applications with Java 8</description>
 	<developers>
@@ -23,12 +23,9 @@
 	<properties>
 		<timestamp>${maven.build.timestamp}</timestamp>
 		<maven.build.timestamp.format>yyyy-MM-dd HH:mm:ss</maven.build.timestamp.format>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 	</properties>
 	<repositories>
-		<repository>
-			<id>diff_match_patch</id>
-			<url>http://google-diff-match-patch.googlecode.com/svn/trunk/maven</url>
-		</repository>
 		<repository>
 			<id>jsweet-central</id>
 			<name>libs-release</name>
@@ -60,6 +57,7 @@
 				<configuration>
 					<source>1.8</source>
 					<target>1.8</target>
+					<encoding>${project.build.sourceEncoding}</encoding>
 				</configuration>
 			</plugin>
 			<plugin>
@@ -70,6 +68,17 @@
 					<includes>
 						<include>**/*.java</include>
 					</includes>
+				</configuration>
+			</plugin>
+			<plugin>
+				<artifactId>maven-clean-plugin</artifactId>
+				<version>3.0.0</version>
+				<configuration>
+					<filesets>
+						<fileset>
+							<directory>.jsweet</directory>
+						</fileset>
+					</filesets>
 				</configuration>
 			</plugin>
 
@@ -99,12 +108,25 @@
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-source-plugin</artifactId>
+				<version>3.0.0</version>
+				<executions>
+					<execution>
+						<id>attach-sources</id>
+						<goals>
+							<goal>jar</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-javadoc-plugin</artifactId>
 				<version>2.10.3</version>
 				<configuration>
 					<javadocVersion>1.8</javadocVersion>
 					<sourcepath>src/main/java</sourcepath>
-					<encoding>UTF-8</encoding>
+					<encoding>${project.build.sourceEncoding}</encoding>
 					<fixTags>all</fixTags>
 					<failOnError>false</failOnError>
 					<reportOutputDirectory>/var/www/apidocs/org/jsweet</reportOutputDirectory>
@@ -113,97 +135,16 @@
 					<bottom><![CDATA[<center>Copyright 2015, <a href="http://www.cincheo.org" target="_blank">Cinchéo SAS<a> - Web site: <a href="http://www.jsweet.org" target="_blank">http://www.jsweet.org<a><center>]]></bottom>
 					<stylesheetfile>/var/www/apidocs/stylesheet.css</stylesheetfile>
 				</configuration>
-			</plugin>
-			<plugin>
-				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>exec-maven-plugin</artifactId>
-				<version>1.4.0</version>
 				<executions>
 					<execution>
-						<id>doc-markdown</id>
+						<id>attach-javadocs</id>
 						<goals>
-							<goal>exec</goal>
+							<goal>jar</goal>
 						</goals>
-						<phase>generate-sources</phase>
-						<configuration>
-							<executable>pandoc</executable>
-							<workingDirectory>doc</workingDirectory>
-							<arguments>
-								<argument>-r</argument>
-								<argument>latex</argument>
-								<argument>-w</argument>
-								<argument>markdown_github</argument>
-								<argument>--base-header-level=2</argument>
-								<argument>-s</argument>
-								<argument>--toc</argument>
-								<argument>--number-sections</argument>
-								<argument>-B</argument>
-								<argument>header.md</argument>
-								<argument>-o</argument>
-								<argument>jsweet-language-specifications.md</argument>
-								<argument>jsweet-language-specifications.tex</argument>
-							</arguments>
-						</configuration>
-					</execution>
-					<execution>
-						<id>doc-html</id>
-						<goals>
-							<goal>exec</goal>
-						</goals>
-						<phase>generate-sources</phase>
-						<configuration>
-							<executable>pandoc</executable>
-							<workingDirectory>doc</workingDirectory>
-							<arguments>
-								<argument>-r</argument>
-								<argument>latex</argument>
-								<argument>-w</argument>
-								<argument>html5</argument>
-								<argument>--base-header-level=3</argument>
-								<argument>-o</argument>
-								<argument>jsweet-language-specifications.html</argument>
-								<argument>jsweet-language-specifications.tex</argument>
-							</arguments>
-						</configuration>
 					</execution>
 				</executions>
 			</plugin>
 		</plugins>
-		<pluginManagement>
-			<plugins>
-				<!--This plugin's configuration is used to store Eclipse m2e settings only. It has no influence on the Maven build itself.-->
-				<plugin>
-					<groupId>org.eclipse.m2e</groupId>
-					<artifactId>lifecycle-mapping</artifactId>
-					<version>1.0.0</version>
-					<configuration>
-						<lifecycleMappingMetadata>
-							<pluginExecutions>
-								<pluginExecution>
-									<pluginExecutionFilter>
-										<groupId>
-											org.codehaus.mojo
-										</groupId>
-										<artifactId>
-											exec-maven-plugin
-										</artifactId>
-										<versionRange>
-											[1.4.0,)
-										</versionRange>
-										<goals>
-											<goal>exec</goal>
-										</goals>
-									</pluginExecutionFilter>
-									<action>
-										<ignore></ignore>
-									</action>
-								</pluginExecution>
-							</pluginExecutions>
-						</lifecycleMappingMetadata>
-					</configuration>
-				</plugin>
-			</plugins>
-		</pluginManagement>
 	</build>
 	<dependencies>
 		<dependency>
@@ -233,11 +174,6 @@
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>diff_match_patch</groupId>
-			<artifactId>diff_match_patch</artifactId>
-			<version>current</version>
-		</dependency>
-		<dependency>
 			<groupId>log4j</groupId>
 			<artifactId>log4j</artifactId>
 			<version>1.2.17</version>
@@ -265,7 +201,7 @@
 			<artifactId>javassist</artifactId>
 			<version>3.20.0-GA</version>
 		</dependency>
-		<!-- Compile-time only dependency (JSweet looks up installed JDK at runtime 
+		<!-- Compile-time only dependency (JSweet looks up installed JDK at runtime
 			to conform to legal obligations) -->
 		<dependency>
 			<groupId>com.sun</groupId>
@@ -277,59 +213,107 @@
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
 			<artifactId>jsweet-core</artifactId>
-			<version>1.0.2-SNAPSHOT</version>
+			<version>1.2.0-SNAPSHOT</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
+			<artifactId>es6-promise</artifactId>
+			<version>0.0.0-SNAPSHOT</version>
+		</dependency>
+		<dependency>
+			<groupId>org.jsweet.candies</groupId>
 			<artifactId>body-parser</artifactId>
-			<version>0.0.2-SNAPSHOT</version>
+			<version>0.0.0-SNAPSHOT</version>
+			<scope>test</scope>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.jsweet.candies</groupId>
+			<artifactId>j4ts</artifactId>
+			<version>0.1.0</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
 			<artifactId>node</artifactId>
-			<version>4.0.2-SNAPSHOT</version>
+			<version>4.0.0-SNAPSHOT</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
 			<artifactId>errorhandler</artifactId>
-			<version>0.0.2-SNAPSHOT</version>
+			<version>0.0.0-SNAPSHOT</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
 			<artifactId>socket.io</artifactId>
-			<version>1.3.50002-SNAPSHOT</version>
+			<version>1.4.4-SNAPSHOT</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
 			<artifactId>jquery</artifactId>
-			<version>1.10.2-SNAPSHOT</version>
+			<version>1.10.0-SNAPSHOT</version>
+			<scope>test</scope>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.jsweet.candies</groupId>
+			<artifactId>jqueryui</artifactId>
+			<version>1.9.0-SNAPSHOT</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
 			<artifactId>angular</artifactId>
-			<version>1.4.2-SNAPSHOT</version>
+			<version>1.4.0-SNAPSHOT</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
 		<dependency>
 			<groupId>org.jsweet.candies</groupId>
 			<artifactId>angular-route</artifactId>
-			<version>1.3.2-SNAPSHOT</version>
+			<version>1.3.0-SNAPSHOT</version>
 			<scope>test</scope>
 			<optional>true</optional>
 		</dependency>
+		<dependency>
+			<groupId>org.jsweet.candies</groupId>
+			<artifactId>backbone</artifactId>
+			<version>1.0.0-SNAPSHOT</version>
+			<scope>test</scope>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.jsweet.candies</groupId>
+			<artifactId>threejs--three</artifactId>
+			<version>0.0.0-SNAPSHOT</version>
+			<scope>test</scope>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.jsweet.candies</groupId>
+			<artifactId>babylonjs--babylon</artifactId>
+			<version>2.3.0-SNAPSHOT</version>
+			<scope>test</scope>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.jsweet.candies</groupId>
+			<artifactId>react-global</artifactId>
+			<version>0.14.0-SNAPSHOT</version>
+			<scope>test</scope>
+			<optional>true</optional>
+		</dependency>
+
 	</dependencies>
 	<organization>
 		<name>JSweet</name>
